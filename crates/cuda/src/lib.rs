@@ -50,6 +50,11 @@
 //! the host holds. Managed memory is sent to the GPU before a kernel needs it by
 //! [`Unified::prefetch`], and advised how it is used by [`Unified::advise`].
 //!
+//! Kernels run in the order they are launched on one stream, and a GPU runs the work of two streams at once where it
+//! has room. All the work goes to the GPU's null stream, unless a thread makes another stream current for a closure,
+//! [`Stream::run`], which [`Cuda::stream`] makes: a launch goes to the current stream of its GPU on the thread. A
+//! stream is blocking, so the copies and the drops that wait for the null stream's work wait for its work too.
+//!
 //! A kernel whose blocks wait for each other is launched cooperatively,
 //! [`Module::launch_cooperative`]: every block of the grid runs at once, so there are at most
 //! [`Module::resident`] of them, and the driver gives the launch a barrier for the grid.
@@ -65,10 +70,12 @@ mod half;
 #[doc(hidden)]
 pub mod named;
 mod safe;
+mod stream;
 mod unified;
 
 pub use half::{bf16, f16};
 pub use safe::{Memory, MemoryMut, Quantity, Requirement, View, Why, holds};
+pub use stream::Stream;
 pub use unified::{Advice, Location, Placement, Unified};
 
 /// What every function of the driver returns: 0, or what went wrong.
@@ -168,6 +175,9 @@ api! {
     can_access_peer = c"cuDeviceCanAccessPeer"(*mut c_int, c_int, c_int);
     enable_peer_access = c"cuCtxEnablePeerAccess"(Handle, c_uint);
     synchronize = c"cuCtxSynchronize"();
+    create_stream = c"cuStreamCreate"(*mut Handle, c_uint);
+    destroy_stream = c"cuStreamDestroy_v2"(Handle);
+    sync_stream = c"cuStreamSynchronize"(Handle);
     alloc = c"cuMemAlloc_v2"(*mut u64, usize);
     alloc_managed = c"cuMemAllocManaged"(*mut u64, usize, c_uint);
     free = c"cuMemFree_v2"(u64);
@@ -1089,7 +1099,8 @@ impl Module {
     }
 
     /// Launches kernel `index`, as [`load`](Module::load) was given its name, over `grid`,
-    /// with `args`, each a parameter by [`arg`]. A block's shared memory, the kernel's own and
+    /// with `args`, each a parameter by [`arg`], on the current stream of the module's GPU: the
+    /// null stream, or the one [`Stream::run`] made current. A block's shared memory, the kernel's own and
     /// the grid's together, may be all [`Cuda::max_shared`] gives. The driver gives 48 KB unasked,
     /// and a GPU from Volta on can give more once the kernel is let have it: the launch that
     /// needs more asks the driver, once, and a launch of no more than that asks it nothing. A
@@ -1114,7 +1125,7 @@ impl Module {
         self.let_have(k, &grid)?;
         // SAFETY: the caller's. The driver reads `args`, and through them, as it launches.
         let launched = unsafe {
-            (api.launch)(k.function, bx, by, bz, tx, ty, tz, grid.shared, ptr::null_mut(), params, ptr::null_mut())
+            (api.launch)(k.function, bx, by, bz, tx, ty, tz, grid.shared, self.driver.stream(), params, ptr::null_mut())
         };
         api.check("cuLaunchKernel", launched).map_err(|e| self.driver.refused(e, launched, &grid, k))
     }
@@ -1139,7 +1150,7 @@ impl Module {
         self.let_have(k, &grid)?;
         // SAFETY: the caller's. The driver reads `args`, and through them, as it launches.
         let launched = unsafe {
-            (api.launch_cooperative)(k.function, bx, by, bz, tx, ty, tz, grid.shared, ptr::null_mut(), params)
+            (api.launch_cooperative)(k.function, bx, by, bz, tx, ty, tz, grid.shared, self.driver.stream(), params)
         };
         api.check("cuLaunchCooperativeKernel", launched).map_err(|e| {
             let mut e = self.driver.refused(e, launched, &grid, k);
@@ -1285,6 +1296,8 @@ impl<T: Plain> fmt::Debug for Global<'_, T> {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::panic::{self, AssertUnwindSafe};
+    use std::sync::mpsc;
 
     use super::*;
 
@@ -1318,7 +1331,9 @@ mod tests {
         assert_eq!(api.advise.err().ok_or("err gave None")?.to_string(), lacks("cuMemAdvise_v2"));
         let api = Api::load(finds(&[])).ok().ok_or("ok gave None")?;
         assert!(api.prefetch.is_ok() && api.advise.is_ok(), "a driver that has them has them");
-        for name in [c"cuInit", c"cuMemRangeGetAttribute", c"cuMemGetInfo_v2", c"cuGetErrorString"] {
+        for name in
+            [c"cuInit", c"cuMemRangeGetAttribute", c"cuMemGetInfo_v2", c"cuStreamDestroy_v2", c"cuGetErrorString"]
+        {
             let e = Api::load(finds(&[name])).err().ok_or("err gave None")?;
             assert_eq!(e.to_string(), lacks(&name.to_string_lossy()), "{name:?}");
         }
@@ -1367,6 +1382,8 @@ mod tests {
         static NEXT: Cell<u64> = const { Cell::new(0x7000_0000_0000) };
         /// The context the fake driver works in: the one it was last made to make current.
         static WORKING_IN: Cell<usize> = const { Cell::new(0) };
+        /// How many streams the fake driver has made.
+        static STREAMS_MADE: Cell<usize> = const { Cell::new(0) };
     }
 
     /// What the fake driver was asked since the last call, which empties it.
@@ -1424,6 +1441,82 @@ mod tests {
         0
     }
 
+    /// The fake driver's `cuModuleGetFunction`: each kernel is the function 5.
+    unsafe extern "C" fn function(at: *mut Handle, _: Handle, _: *const c_char) -> CuResult {
+        // SAFETY: the caller gives a place for the function.
+        unsafe { *at = ptr::without_provenance_mut(5) };
+        0
+    }
+
+    /// The fake driver's `cuFuncGetAttribute`: every attribute is 0.
+    unsafe extern "C" fn function_attribute(value: *mut c_int, _: c_int, _: Handle) -> CuResult {
+        // SAFETY: the caller gives a place for the value.
+        unsafe { *value = 0 };
+        0
+    }
+
+    /// The fake driver's `cuLaunchKernel`: it says the stream, and the context it works in.
+    unsafe extern "C" fn launch(
+        _: Handle,
+        _: c_uint,
+        _: c_uint,
+        _: c_uint,
+        _: c_uint,
+        _: c_uint,
+        _: c_uint,
+        _: c_uint,
+        stream: Handle,
+        _: *mut *mut c_void,
+        _: *mut *mut c_void,
+    ) -> CuResult {
+        ask(format!("launch on {:#x} in {}", stream.addr(), WORKING_IN.get()));
+        0
+    }
+
+    /// The fake driver's `cuLaunchCooperativeKernel`: it says the same.
+    unsafe extern "C" fn launch_cooperative(
+        _: Handle,
+        _: c_uint,
+        _: c_uint,
+        _: c_uint,
+        _: c_uint,
+        _: c_uint,
+        _: c_uint,
+        _: c_uint,
+        stream: Handle,
+        _: *mut *mut c_void,
+    ) -> CuResult {
+        ask(format!("launch cooperatively on {:#x} in {}", stream.addr(), WORKING_IN.get()));
+        0
+    }
+
+    /// The fake driver's `cuStreamCreate`: the streams are 0x100, 0x200 and so on, and it says the flags it is given,
+    /// and the context it works in. In the context 13 it is `CUDA_ERROR_INVALID_CONTEXT`.
+    pub(super) unsafe extern "C" fn create_stream(at: *mut Handle, flags: c_uint) -> CuResult {
+        if WORKING_IN.get() == 13 {
+            return 201;
+        }
+        STREAMS_MADE.set(STREAMS_MADE.get() + 1);
+        let stream = STREAMS_MADE.get() * 0x100;
+        ask(format!("create {stream:#x} with flags {flags} in {}", WORKING_IN.get()));
+        // SAFETY: the caller gives a place for the stream.
+        unsafe { *at = ptr::without_provenance_mut(stream) };
+        0
+    }
+
+    /// The fake driver's `cuStreamDestroy`: it says the stream, and the context it works in.
+    pub(super) unsafe extern "C" fn destroy_stream(stream: Handle) -> CuResult {
+        ask(format!("destroy {:#x} in {}", stream.addr(), WORKING_IN.get()));
+        0
+    }
+
+    /// The fake driver's `cuStreamSynchronize`: it says the stream, and the context it works in. In the context 14 the
+    /// work of every stream has failed, with `CUDA_ERROR_ILLEGAL_ADDRESS`.
+    unsafe extern "C" fn sync_stream(stream: Handle) -> CuResult {
+        ask(format!("sync {:#x} in {}", stream.addr(), WORKING_IN.get()));
+        if WORKING_IN.get() == 14 { 700 } else { 0 }
+    }
+
     /// The fake driver's `cuModuleGetGlobal`: the module has `small`, 16 bytes at 0x1000, and two `.u64` of constant
     /// memory, `slot` at 0x2000 and `other` at 0x3000.
     unsafe extern "C" fn module_global(at: *mut u64, bytes: *mut usize, _: Handle, name: *const c_char) -> CuResult {
@@ -1474,11 +1567,12 @@ mod tests {
         0
     }
 
-    /// The fake driver's `cuGetErrorName`, and `cuGetErrorString`, which know the two errors it has.
+    /// The fake driver's `cuGetErrorName`, and `cuGetErrorString`, which know the three errors it has.
     unsafe extern "C" fn error_name(result: CuResult, name: *mut *const c_char) -> CuResult {
         let known = match result {
             2 => c"CUDA_ERROR_OUT_OF_MEMORY".as_ptr(),
             201 => c"CUDA_ERROR_INVALID_CONTEXT".as_ptr(),
+            700 => c"CUDA_ERROR_ILLEGAL_ADDRESS".as_ptr(),
             _ => ptr::null(),
         };
         // SAFETY: the caller gives a place for the string.
@@ -1490,6 +1584,7 @@ mod tests {
         let known = match result {
             2 => c"out of memory".as_ptr(),
             201 => c"invalid device context".as_ptr(),
+            700 => c"an illegal memory access was encountered".as_ptr(),
             _ => ptr::null(),
         };
         // SAFETY: the caller gives a place for the string.
@@ -1497,17 +1592,25 @@ mod tests {
         0
     }
 
-    /// A GPU of the fake driver, whose primary context is `context`, which has the calls a module's memory makes and
-    /// `cuMemGetInfo`, and refuses the rest.
+    /// A GPU of the fake driver, whose primary context is `context`, which has the calls a module's memory makes, its
+    /// launches' and the streams', and `cuMemGetInfo`, and refuses the rest.
     fn gpu_in(context: usize) -> Result<Cuda> {
         NEXT.set(0x7000_0000_0000);
+        STREAMS_MADE.set(0);
         asked();
         let mut api = Api::refusing();
         api.attribute = attribute;
         api.set_current = set_current;
         api.load_module = load_module;
         api.unload_module = unload_module;
+        api.function = function;
+        api.function_attribute = function_attribute;
         api.global = module_global;
+        api.launch = launch;
+        api.launch_cooperative = launch_cooperative;
+        api.create_stream = create_stream;
+        api.destroy_stream = destroy_stream;
+        api.sync_stream = sync_stream;
         api.alloc = alloc;
         api.memset = memset;
         api.memory_info = memory_info;
@@ -1614,6 +1717,200 @@ mod tests {
     fn a_refusal_of_the_driver_is_the_error_of_memory() -> Result {
         let e = gpu_in(13)?.memory().err().ok_or("memory gave Ok")?;
         assert_eq!(e.to_string(), "cuMemGetInfo: CUDA_ERROR_INVALID_CONTEXT (201): invalid device context");
+        Ok(())
+    }
+
+    /// A module of one kernel, `k`, on `cuda`, with what it asked of the driver forgotten.
+    fn kernel(cuda: &Cuda) -> Result<Module> {
+        let module = Module::load(cuda, "", &["k"], &[])?;
+        asked();
+        Ok(module)
+    }
+
+    /// Kernel 0 of `module` launched over one thread, and what that asked of the driver.
+    fn launched(module: &Module) -> Result<Vec<String>> {
+        // SAFETY: the fake driver reads no argument, and runs no kernel.
+        unsafe { module.launch(0, Grid::new(1, 1), &[]) }?;
+        Ok(asked())
+    }
+
+    /// `work`, with `stream` the current stream of its GPU.
+    fn running<R>(stream: &Stream, work: impl FnOnce() -> R) -> R {
+        // SAFETY: the fake driver runs no work, so no stream's work reaches memory.
+        unsafe { stream.run(work) }
+    }
+
+    /// A stream is made as the driver is asked for a blocking one, with no flags. It is waited for as the driver is
+    /// asked, and destroyed once, when it is dropped, even after the `Cuda` that made it.
+    #[test]
+    fn a_stream_is_made_blocking_waited_for_and_destroyed_as_the_driver_is_asked() -> Result {
+        let cuda = gpu()?;
+        let (first, second) = (cuda.stream()?, cuda.stream()?);
+        assert_eq!(asked(), ["create 0x100 with flags 0 in 1", "create 0x200 with flags 0 in 1"]);
+        first.sync()?;
+        assert_eq!(asked(), ["sync 0x100 in 1"]);
+        drop(cuda);
+        drop(first);
+        assert_eq!(asked(), ["destroy 0x100 in 1"]);
+        drop(second);
+        assert_eq!(asked(), ["destroy 0x200 in 1"]);
+        Ok(())
+    }
+
+    /// What the driver refuses is the error of the call it refused, in the driver's words: a stream is not made where
+    /// it refuses `cuStreamCreate`, and the work that failed on a stream is the error of the `sync` that waits for it.
+    #[test]
+    fn a_refusal_of_the_driver_is_the_error_of_making_a_stream_and_of_waiting_for_one() -> Result {
+        let e = gpu_in(13)?.stream().err().ok_or("stream gave Ok")?;
+        assert_eq!(e.to_string(), "cuStreamCreate: CUDA_ERROR_INVALID_CONTEXT (201): invalid device context");
+        gpu()?.stream()?.sync()?;
+        let e = gpu_in(14)?.stream()?.sync().err().ok_or("sync gave Ok")?;
+        let said = "cuStreamSynchronize: CUDA_ERROR_ILLEGAL_ADDRESS (700): an illegal memory access was encountered";
+        assert_eq!(e.to_string(), said);
+        Ok(())
+    }
+
+    /// A launch goes to the null stream, the driver's 0, until a `run` makes a stream current, and then to the stream;
+    /// and it asks the driver for the launch alone, whichever. Afterwards it goes to the null stream again.
+    #[test]
+    fn a_launch_goes_to_the_null_stream_and_in_a_run_to_the_stream_and_asks_the_driver_for_the_launch_alone() -> Result
+    {
+        let cuda = gpu()?;
+        let (module, stream) = (kernel(&cuda)?, cuda.stream()?);
+        asked();
+        assert_eq!(launched(&module)?, ["launch on 0x0 in 1"]);
+        assert_eq!(running(&stream, || launched(&module))?, ["launch on 0x100 in 1"]);
+        assert_eq!(launched(&module)?, ["launch on 0x0 in 1"]);
+        assert_eq!(running(&stream, || 7), 7, "run gives back what the closure gives");
+        Ok(())
+    }
+
+    /// A cooperative launch goes to the current stream too.
+    #[test]
+    fn a_cooperative_launch_goes_to_the_current_stream_too() -> Result {
+        let cuda = gpu()?;
+        let (module, stream) = (kernel(&cuda)?, cuda.stream()?);
+        asked();
+        let cooperatively = || -> Result<Vec<String>> {
+            // SAFETY: as in `launched`.
+            unsafe { module.launch_cooperative(0, Grid::new(1, 1), &[]) }?;
+            Ok(asked())
+        };
+        assert_eq!(cooperatively()?, ["launch cooperatively on 0x0 in 1"]);
+        assert_eq!(running(&stream, cooperatively)?, ["launch cooperatively on 0x100 in 1"]);
+        Ok(())
+    }
+
+    /// A `run` in a `run` makes its stream current, and gives the stream before it back when it ends, whether it
+    /// returns or panics; the same stream in itself too.
+    #[test]
+    fn a_run_in_a_run_gives_back_the_stream_before_it_when_it_returns_and_when_it_panics() -> Result {
+        let cuda = gpu()?;
+        let (module, a, b) = (kernel(&cuda)?, cuda.stream()?, cuda.stream()?);
+        asked();
+        let mut seen = vec![];
+        running(&a, || -> Result {
+            seen.push(launched(&module)?);
+            running(&b, || -> Result {
+                seen.push(launched(&module)?);
+                Ok(())
+            })?;
+            seen.push(launched(&module)?);
+            running(&a, || -> Result {
+                running(&a, || ());
+                seen.push(launched(&module)?);
+                Ok(())
+            })?;
+            seen.push(launched(&module)?);
+            let panicked =
+                panic::catch_unwind(AssertUnwindSafe(|| running(&b, || panic::resume_unwind(Box::new("a panic")))));
+            assert!(panicked.is_err(), "the closure did not panic");
+            seen.push(launched(&module)?);
+            Ok(())
+        })?;
+        seen.push(launched(&module)?);
+        let to = |stream: usize| vec![format!("launch on {stream:#x} in 1")];
+        assert_eq!(seen, [to(0x100), to(0x200), to(0x100), to(0x100), to(0x100), to(0x100), to(0)]);
+        Ok(())
+    }
+
+    /// A stream is made, waited for and destroyed in the context of its own GPU, whichever GPU the call before it went
+    /// to. It is current for its own GPU and its own thread alone: a launch on another GPU goes to the null stream of
+    /// that one, a stream of each GPU current is current for each, and a launch of another thread goes to the null
+    /// stream.
+    #[test]
+    fn a_stream_is_of_its_gpu_and_current_for_its_gpu_and_its_thread_alone() -> Result {
+        let (first, second) = (gpu_in(11)?, gpu_in(12)?);
+        let (on_first, on_second) = (kernel(&first)?, kernel(&second)?);
+        let (a, b) = (first.stream()?, second.stream()?);
+        assert_eq!(asked(), ["create 0x100 with flags 0 in 11", "create 0x200 with flags 0 in 12"]);
+        let (launch_a, launch_b) = running(&a, || (launched(&on_first), launched(&on_second)));
+        assert_eq!(launch_a?, ["launch on 0x100 in 11"]);
+        assert_eq!(launch_b?, ["launch on 0x0 in 12"]);
+        let (launch_a, launch_b) = running(&a, || running(&b, || (launched(&on_first), launched(&on_second))));
+        assert_eq!(launch_a?, ["launch on 0x100 in 11"]);
+        assert_eq!(launch_b?, ["launch on 0x200 in 12"]);
+        let elsewhere = running(&a, || {
+            std::thread::scope(|scope| {
+                scope.spawn(|| -> Result<Vec<String>> { launched(&kernel(&gpu_in(11)?)?) }).join()
+            })
+        });
+        assert_eq!(elsewhere.map_err(|_| "the thread panicked")??, ["launch on 0x0 in 11"]);
+        a.sync()?;
+        b.sync()?;
+        a.sync()?;
+        assert_eq!(asked(), ["sync 0x100 in 11", "sync 0x200 in 12", "sync 0x100 in 11"]);
+        drop(a);
+        drop(b);
+        assert_eq!(asked(), ["destroy 0x100 in 11", "destroy 0x200 in 12"]);
+        Ok(())
+    }
+
+    /// A launch through another `Cuda` of the GPU, the same context, goes to the stream of the GPU: the stream is the
+    /// context's, and not that of the `Cuda` that made it.
+    #[test]
+    fn a_launch_through_another_cuda_of_the_gpu_goes_to_the_stream_of_the_gpu() -> Result {
+        let (cuda, other) = (gpu()?, gpu()?);
+        let (stream, module) = (cuda.stream()?, kernel(&other)?);
+        assert_eq!(running(&stream, || launched(&module))?, ["launch on 0x100 in 1"]);
+        Ok(())
+    }
+
+    /// A module that launches its kernel when it is dropped, and sends what that asked of the fake driver.
+    struct LaunchesWhenDropped(Module, mpsc::Sender<Result<Vec<String>, String>>);
+
+    impl Drop for LaunchesWhenDropped {
+        fn drop(&mut self) {
+            // The thread has ended: if no one hears it, no one needs it.
+            let _ = self.1.send(launched(&self.0).map_err(|e| e.to_string()));
+        }
+    }
+
+    /// A launch in the destructor of a thread-local, as the thread ends, goes to the null stream, and no thread-local
+    /// of kernite's is read there that may be gone, as a panic in a destructor aborts the process. The thread-local
+    /// that launches is touched after the fake driver's record, and before the first `run`, which touches what a
+    /// `run` keeps if it is a thread-local with a destructor; Linux ends a thread's thread-locals in the reverse
+    /// order of their first touches, so that one is gone when the launch is made.
+    #[test]
+    fn a_launch_as_a_thread_ends_goes_to_the_null_stream_whichever_thread_locals_are_gone() -> Result {
+        thread_local! {
+            static LATE: RefCell<Option<LaunchesWhenDropped>> = const { RefCell::new(None) };
+        }
+        let (send, hear) = mpsc::channel();
+        std::thread::spawn(move || -> Result {
+            let cuda = gpu()?;
+            let module = kernel(&cuda)?;
+            LATE.set(Some(LaunchesWhenDropped(module, send)));
+            let stream = cuda.stream()?;
+            running(&stream, || ());
+            // What is asked from here is the launch's alone.
+            drop((stream, cuda));
+            asked();
+            Ok(())
+        })
+        .join()
+        .map_err(|_| "the thread panicked")??;
+        assert_eq!(hear.recv()?, Ok(vec!["launch on 0x0 in 1".to_string()]));
         Ok(())
     }
 }

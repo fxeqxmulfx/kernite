@@ -5651,6 +5651,18 @@ fn a_mut_before_a_parameters_name_is_taken_and_means_nothing_in_a_function_of_ev
     Ok(())
 }
 
+/// A launcher the macros write goes to the current stream of its GPU, which `Stream::run` makes current for a closure,
+/// and to the null stream where there is none, that of a kernel that is `unsafe` and that of one kernite proves safe:
+/// the fixture's kernels, `waits` that spins on a flag, and `bump` and `sets`, the last of which writes the flag, are
+/// launched on two streams, where `waits` sees the flag, and on a stream and the null stream, where it does not. Rust
+/// builds the crate without a word, under `#![deny(warnings)]`.
+#[test]
+fn a_launcher_goes_to_the_current_stream_and_to_the_null_stream_where_there_is_none() -> Result {
+    let printed = runs_quietly(&["test"], "streams")?;
+    assert!(printed.contains("test result: ok. 1 passed"), "fixtures/streams.rs ran its test, and printed:\n{printed}");
+    Ok(())
+}
+
 /// The method that says how many blocks a cooperative GPU kernel's grid has at most, `k_blocks`,
 /// keeps what the kernel says of lints by giving Rust nothing of the kernel's to lint: its name and
 /// the compile-time arguments it takes are of the macro's span. Of the kernel's attributes it keeps

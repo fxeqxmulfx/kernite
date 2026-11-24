@@ -2,7 +2,7 @@
 
 kernite-cuda is the CUDA driver, opened when a GPU is asked for, so that a program built with GPU kernels still runs
 where there is none. It holds memory on the GPU and says how much is free, and loads and launches the PTX that
-`kernite-macros` writes. A crate with a GPU kernel adds it, beside `kernite-macros`.
+`kernite-macros` writes, on its streams. A crate with a GPU kernel adds it, beside `kernite-macros`.
 
 ```sh
 cargo add kernite-macros kernite-cuda

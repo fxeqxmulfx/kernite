@@ -988,6 +988,25 @@ gives programs on it, as `cuMemGetInfo_v2` says them. The total is the same each
 GPU's memory, not this one alone, so the free bytes are true as they are asked, and a buffer made after may find fewer.
 The call goes to the GPU of the `Cuda`, as each call does.
 
+`cuda.stream()` is a stream of the GPU: a queue of work that the GPU runs in order, beside the work of other streams.
+The work of a GPU goes to its null stream unless the thread says another: a kernel is launched on the current stream of
+its GPU, and `unsafe { stream.run(|| ..) }` makes `stream` the current stream of its GPU on the thread for the closure.
+Each launch in the closure goes to `stream`, through whichever `Cuda` of the GPU makes it, by `Module::launch` or by a
+launcher that kernite writes; so does `prefetch`. A `run` may be in a `run`. The stream that was current is current
+again when the closure returns, or panics, and a stream of another GPU is current for that GPU alone. A stream is
+blocking: its work and the null stream's wait for each other. So `zero` and `copy_from` run after the kernels that a
+stream was given before them, and before those it is given after; and `read`, `write`, `host()`, `host_mut()`, and the
+drop of a buffer, of unified memory and of a module, wait for the stream's work. The work of two streams does not wait
+for each other, and runs at once where the GPU has room. `stream.sync()` waits for the work of that stream alone, and
+`cuda.sync()` for all of the GPU's. Dropping a stream destroys it, and the work it holds runs on.
+
+`run` is `unsafe`, as kernite cannot see what the work of two streams reaches. Until the work that the closure launches
+is done, work of another stream that may run beside it must write no memory that it reaches, and reach none that it
+writes; the null stream's work, and `sync`, order the two. Each call in the closure is as safe as it is on the null
+stream. A launch asks the driver for `cuLaunchKernel` alone, whichever stream is current: kernite finds the current
+stream in a thread-local, which needs no call to the driver. That thread-local has no destructor, so a launch finds it
+as a thread ends too, in the destructor of another thread-local.
+
 A buffer is the GPU's own memory, which the host reaches by copies. Unified memory is reached by the host and by the
 GPU's kernels at one address, with no copy, and it is of one of three kinds. `cuda.managed::<f32>(len)` is `len` zeros
 of managed memory, which the driver moves to whichever of the host and the GPU touches it. `cuda.pinned::<f32>(len)` is
@@ -1453,7 +1472,7 @@ Each crate depends only on the layers inside it. `crates/kernite/tests/architect
 | adapters | `kernite-x86`, `kernite-ptx` | x86-64: its instructions, SysV, Intel syntax; PTX for NVIDIA GPUs |
 | composition | `kernite` | which machine and syntax each kernel compiles with |
 | delivery | `kernite-macros` | kernels as functions: `#[unsafe(naked)]`, and the safe functions that call them; launchers of a grid's threads, or launchers of PTX |
-| runtime | `kernite-cuda` | the CUDA driver: the GPUs, memory on each and how much of it is free, memory the host reaches too, modules, launches and what a safe kernel's launch must hold, copies between GPUs; `f16` and `bf16`; depends on no other crate |
+| runtime | `kernite-cuda` | the CUDA driver: the GPUs, memory on each and how much of it is free, memory the host reaches too, modules, launches and what a safe kernel's launch must hold, streams that launches go to, copies between GPUs; `f16` and `bf16`; depends on no other crate |
 | runtime | `kernite-cpu` | the threads of a cooperative x86 kernel's grid and the CPUs they run on, and the memory of a module of x86 kernels; depends on no other crate |
 
 ## Guarantees

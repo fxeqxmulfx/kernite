@@ -342,6 +342,49 @@ fn dropping_a_slice_lent_waits_for_the_kernel_and_the_host_has_the_slice_back() 
     Ok(())
 }
 
+/// `host_waits` and then `drop_waits` on `m`, with each kernel launched in the `run` of a stream: the host and the drop
+/// wait for the kernel of a stream, as they do for one of the null stream, which the stream is blocking for, and the
+/// host sees what the kernel wrote.
+fn waits_for_a_stream(cuda: &Cuda, module: &Module, mut m: Unified<u32>) -> Result {
+    let stream = cuda.stream()?;
+    // SAFETY: each kernel writes the first word of `m` alone, which no other kernel reaches: those of the other tests
+    // are on their own memory. The host holds no slice of `m` while one runs, as `host_waits` and `drop_waits` hold
+    // none, and where the GPU cannot reach managed memory while the host does, `setup` has this test run alone.
+    unsafe {
+        stream.run(|| host_waits(module, &mut m))?;
+        stream.run(|| drop_waits(module, m))
+    }
+}
+
+#[test]
+fn the_host_and_the_drop_wait_for_a_kernel_of_a_stream_in_managed_memory() -> Result {
+    let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
+    waits_for_a_stream(&cuda, &module, cuda.managed::<u32>(4)?)?;
+    // A kernel that wrote freed memory would have failed.
+    cuda.sync()?;
+    Ok(())
+}
+
+#[test]
+fn the_host_and_the_drop_wait_for_a_kernel_of_a_stream_in_page_locked_memory() -> Result {
+    let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
+    let Some(m) = or_skip(cuda.pinned::<u32>(4), NO_PAGE_LOCKED) else { return Ok(()) };
+    waits_for_a_stream(&cuda, &module, m)?;
+    cuda.sync()?;
+    Ok(())
+}
+
+#[test]
+fn the_host_and_the_drop_wait_for_a_kernel_of_a_stream_in_a_slice_lent_and_the_host_has_the_slice_back() -> Result {
+    let Some((_one, cuda, module)) = setup()? else { return Ok(()) };
+    let mut v = vec![0u32; 4];
+    let Some(lent) = or_skip(cuda.lend(&mut v), NO_PAGEABLE) else { return Ok(()) };
+    waits_for_a_stream(&cuda, &module, lent)?;
+    // `host_waits` leaves [105, 9, 7, 8], and the kernel that `drop_waits` launches adds 100 to the first word.
+    assert_eq!(v, [205, 9, 7, 8], "the kernels' writes are in the Vec when the host has it back");
+    Ok(())
+}
+
 #[test]
 fn page_locked_memory_is_not_moved_advised_or_placed_and_a_slice_lent_is_not_moved_or_placed() -> Result {
     let Some((_one, cuda, _)) = setup()? else { return Ok(()) };
