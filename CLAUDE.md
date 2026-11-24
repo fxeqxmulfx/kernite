@@ -118,7 +118,8 @@ the list of crates in the repository's `README.md`. `architecture.rs` fails with
 - Commit after any progress: each piece that passes `./make.py check` gets its own commit. A message is
   a sentence of what kernite now does, in GUIDE.md's plain words, then a body that says what changed
   and why, wrapped at 72 columns, as `git log` shows, ending with the `Co-Authored-By` line.
-- Don't push, and don't merge into master: both are the user's call.
+- Don't push: that is the user's call. The reviewer merges into master what is ready, as REVIEWER.md
+  says, and no one else does.
 - Don't start a subagent, in any way: by the Agent tool, a workflow or a skill that starts one. Do
   all the work yourself, the searching and the reviewing too.
 - Don't stop to ask. Choose the sensible default, say what you chose, and keep going. Ask only before
