@@ -529,24 +529,21 @@ impl<T: Plain> MemoryMut<T> for Unified<'static, T> {}
 
 impl<T: Plain> Drop for Unified<'_, T> {
     fn drop(&mut self) {
-        // As for a `Buffer`: left, if its GPU's context cannot be made current. The driver waits
-        // for the kernels that use memory before it frees or unlocks it; a slice lent is waited for
+        // The driver waits for the kernels that use memory before it frees or unlocks it; a slice lent is waited for
         // here.
-        if let Ok(api) = self.driver.current() {
-            // SAFETY: the driver gave the address of managed and of page-locked memory, and each is
-            // freed once, here. A slice registered with bytes was registered once, at this address,
-            // and is unlocked once, here. A slice lent or registered is the host's, which frees it.
-            unsafe {
-                match self.kind {
-                    Kind::Managed => (api.free)(self.addr()),
-                    Kind::Pinned => (api.free_host)(self.ptr.cast()),
-                    // A slice with no bytes was not locked: there is nothing to unlock, and no kernel reaches it.
-                    Kind::Registered if self.len * size_of::<T>() == 0 => 0,
-                    Kind::Registered => (api.unregister)(self.ptr.cast()),
-                    Kind::Lent => (api.synchronize)(),
-                }
-            };
-        }
+        // SAFETY: the driver gave the address of managed and of page-locked memory, and each is freed once, here. A
+        // slice registered with bytes was registered once, at this address, and is unlocked once, here. A slice lent
+        // or registered is the host's, which frees it.
+        self.driver.give_back(|api| unsafe {
+            match self.kind {
+                Kind::Managed => (api.free)(self.addr()),
+                Kind::Pinned => (api.free_host)(self.ptr.cast()),
+                // A slice with no bytes was not locked: there is nothing to unlock, and no kernel reaches it.
+                Kind::Registered if self.len * size_of::<T>() == 0 => 0,
+                Kind::Registered => (api.unregister)(self.ptr.cast()),
+                Kind::Lent => (api.synchronize)(),
+            }
+        });
     }
 }
 
@@ -560,8 +557,13 @@ impl<T: Plain> fmt::Debug for Unified<'_, T> {
 pub(crate) mod tests {
     use std::cell::{Cell, RefCell};
     use std::ffi::{c_uint, c_void};
+    use std::time::{Duration, Instant};
 
-    use super::super::{Api, Buffer, CuResult, Handle, Module};
+    use super::super::tests::{
+        ELSEWHERE, ask, asked, begin_capture, create_stream, destroy_graph, destroy_stream, end_capture, gives_back,
+        set_current as working_in, start_over, waits_for_the_gpu,
+    };
+    use super::super::{Api, Buffer, CuResult, Handle, Module, Stream};
     use super::*;
 
     type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
@@ -637,6 +639,7 @@ pub(crate) mod tests {
     /// The `Cuda` of the GPU `device`, with `context` as its context, and the calls `replace` puts in the driver's
     /// place.
     fn cuda_on(device: c_int, context: usize, replace: impl FnOnce(&mut Api)) -> Result<Cuda> {
+        start_over();
         let mut api = Api::refusing();
         api.device_count = device_count;
         api.device_get = device_get;
@@ -691,8 +694,14 @@ pub(crate) mod tests {
         0
     }
 
-    /// The fake driver's `cuMemFree`, and `cuMemFreeHost`: it frees the block it handed out last.
-    unsafe extern "C" fn free(_: u64) -> CuResult {
+    /// The fake driver's `cuMemFree`, and `cuMemFreeHost`, which it is asked as `call`: it frees the block it handed
+    /// out last, unless a capture of this thread refuses the call.
+    fn free_the_block(call: &str) -> CuResult {
+        ask(call.to_string());
+        let refused = gives_back();
+        if refused != 0 {
+            return refused;
+        }
         let (at, bytes) = BLOCK.get();
         // SAFETY: the block was leaked from a boxed slice of `bytes` bytes, and is freed once.
         drop(unsafe {
@@ -701,16 +710,21 @@ pub(crate) mod tests {
         0
     }
 
-    /// The fake driver's `cuMemFreeHost`.
-    unsafe extern "C" fn free_host(_: *mut c_void) -> CuResult {
-        // SAFETY: as for `free`.
-        unsafe { free(0) }
+    /// The fake driver's `cuMemFree`.
+    unsafe extern "C" fn free(_: u64) -> CuResult {
+        free_the_block("cuMemFree")
     }
 
-    /// The fake driver's `cuCtxSynchronize`: no kernel runs, and the calls are counted.
+    /// The fake driver's `cuMemFreeHost`.
+    unsafe extern "C" fn free_host(_: *mut c_void) -> CuResult {
+        free_the_block("cuMemFreeHost")
+    }
+
+    /// The fake driver's `cuCtxSynchronize`: no kernel runs, and the calls are counted. A capture refuses it.
     unsafe extern "C" fn synchronize() -> CuResult {
         SYNCHRONIZED.set(SYNCHRONIZED.get() + 1);
-        0
+        ask("cuCtxSynchronize".to_string());
+        waits_for_the_gpu()
     }
 
     thread_local! {
@@ -737,10 +751,11 @@ pub(crate) mod tests {
         712
     }
 
-    /// The fake driver's `cuMemHostUnregister`: it keeps what it is asked.
+    /// The fake driver's `cuMemHostUnregister`: it keeps what it is asked, and a capture of this thread refuses it.
     unsafe extern "C" fn unregister(at: *mut c_void) -> CuResult {
         UNREGISTERED.with_borrow_mut(|asked| asked.push(at.addr()));
-        0
+        ask("cuMemHostUnregister".to_string());
+        gives_back()
     }
 
     /// A GPU that has the attributes `flags`, whose driver answers `cuMemHostRegister` with `register`, and keeps what
@@ -1064,6 +1079,121 @@ pub(crate) mod tests {
         assert_eq!(e.call, "cuMemHostRegister");
         assert!(e.message.contains("(712)"), "{e}");
         assert!(UNREGISTERED.with_borrow(Vec::is_empty));
+        Ok(())
+    }
+
+    /// A GPU of the fake driver that says each of `flags` is 1, whose streams and captures are those of `lib.rs`'s fake
+    /// driver, and that takes the calls which give memory back, or wait for the GPU: they are asked, and refused as a
+    /// capture refuses them.
+    fn capturing(flags: &[Flag]) -> Result<Cuda> {
+        start_over();
+        REGISTERED.with_borrow_mut(Vec::clear);
+        UNREGISTERED.with_borrow_mut(Vec::clear);
+        SYNCHRONIZED.set(0);
+        gpu_with(flags, |api| {
+            api.set_current = working_in;
+            api.create_stream = create_stream;
+            api.destroy_stream = destroy_stream;
+            api.begin_capture = begin_capture;
+            api.end_capture = end_capture;
+            api.destroy_graph = destroy_graph;
+            api.alloc_managed = alloc_managed;
+            api.alloc_host = alloc_host;
+            api.memset = memset;
+            api.register = register;
+            api.unregister = unregister;
+            api.free = free;
+            api.free_host = free_host;
+            api.synchronize = synchronize;
+        })
+    }
+
+    /// What the fake driver is asked when `memory`, which was made before, is dropped in the closure of a capture on
+    /// `stream`: the capture is lost, and its error is the end's.
+    fn dropped_in_a_capture<M>(stream: &Stream, memory: M) -> Result<Vec<String>> {
+        asked();
+        let e = stream
+            .capture(|| {
+                drop(memory);
+                Ok(())
+            })
+            .err()
+            .ok_or("capture gave Ok")?;
+        assert_eq!(e.call, "cuStreamEndCapture");
+        assert!(e.message.contains("(901)"), "{e}");
+        Ok(asked())
+    }
+
+    /// The drop of each kind of unified memory makes its call, which a capture of its thread refuses, as the driver
+    /// does, once the capture is ended, and the capture is begun again. The drop of managed memory and that of
+    /// page-locked memory free it, that of a slice registered unlocks it, and that of a slice lent waits for the GPU.
+    #[test]
+    fn the_drop_of_each_kind_of_unified_memory_makes_its_call_once_the_capture_is_ended() -> Result {
+        let all = [
+            MANAGED_MEMORY,
+            CONCURRENT_MANAGED_ACCESS,
+            UNIFIED_ADDRESSING,
+            PAGEABLE_MEMORY_ACCESS,
+            HOST_REGISTER_SUPPORTED,
+            HOST_POINTER_FOR_REGISTERED_MEM,
+        ];
+        let (begin, end) = ("begin capture on 0x100 with mode 1 in 1", "end capture on 0x100 in 1");
+        let destroyed = "destroy graph 0x5000 in 1";
+        for (name, call) in [
+            ("managed", "cuMemFree"),
+            ("pinned", "cuMemFreeHost"),
+            ("registered", "cuMemHostUnregister"),
+            ("lent", "cuCtxSynchronize"),
+        ] {
+            // The fake driver has the one block it handed out last to free, so each memory is made as it is dropped.
+            let (cuda, mut host) = (capturing(&all)?, [1u32, 2, 3]);
+            let stream = cuda.stream()?;
+            let got = match name {
+                "managed" => dropped_in_a_capture(&stream, cuda.managed::<u32>(4)?)?,
+                "pinned" => dropped_in_a_capture(&stream, cuda.pinned::<u32>(4)?)?,
+                "registered" => dropped_in_a_capture(&stream, cuda.register(&mut host)?)?,
+                _ => dropped_in_a_capture(&stream, cuda.lend(&mut host)?)?,
+            };
+            assert_eq!(got, [begin, call, end, call, begin, end, destroyed, destroyed], "{name}");
+        }
+        Ok(())
+    }
+
+    /// A drop that waits for the GPU, as that of a slice lent does, finds a capture of another thread refuse the
+    /// call, and the call is made again until it is not refused, with a little time between the tries, which keeps no
+    /// core busy for as long as the other thread's closure runs. Where a capture of this thread is on too, it is ended
+    /// first, as the call is refused while it is on, and begun again after the call is made.
+    #[test]
+    fn a_drop_waits_out_the_capture_of_another_thread_trying_the_call_again_after_a_little_while() -> Result {
+        let cuda = capturing(&[PAGEABLE_MEMORY_ACCESS])?;
+        let mut host = [1u32, 2, 3];
+        let lent = cuda.lend(&mut host)?;
+        // The call is refused 50 times: the first try, and 49 tries more, each after a little while.
+        ELSEWHERE.set(50);
+        let started = Instant::now();
+        drop(lent);
+        let waited = started.elapsed();
+        assert_eq!(asked(), ["cuCtxSynchronize"; 51], "50 tries are refused, and the next is made");
+        assert!(waited >= Duration::from_millis(4), "the drop tried 49 times in {waited:?}, with no time between");
+
+        let mut host = [1u32, 2, 3];
+        let lent = cuda.lend(&mut host)?;
+        let stream = cuda.stream()?;
+        asked();
+        ELSEWHERE.set(2);
+        let e = stream
+            .capture(|| {
+                drop(lent);
+                Ok(())
+            })
+            .err()
+            .ok_or("capture gave Ok")?;
+        assert!(e.message.contains("(901)"), "{e}");
+        let (begin, end, wait) =
+            ("begin capture on 0x100 with mode 1 in 1", "end capture on 0x100 in 1", "cuCtxSynchronize");
+        let destroyed = "destroy graph 0x5000 in 1";
+        // The capture of this thread refuses the call first, then, once it is ended, that of the other, twice.
+        assert_eq!(asked(), [begin, wait, end, wait, wait, wait, begin, end, destroyed, destroyed]);
         Ok(())
     }
 

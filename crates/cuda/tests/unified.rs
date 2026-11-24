@@ -17,7 +17,7 @@ use std::time::Duration;
 use kernite_cuda::{Advice, Cuda, Error, Grid, Location, Module, Ptr, Unified, arg};
 
 mod common;
-use common::{NO_ADVICE, PAGE, first_page, managed_or_skip, or_skip};
+use common::{NO_ADVICE, NO_PAGEABLE, PAGE, first_page, managed_or_skip, or_skip, register_or_skip};
 mod gpu;
 use gpu::{peek, ptx};
 
@@ -111,34 +111,9 @@ fn delay(module: &Module, x: Ptr<u32>) -> Result {
     Ok(())
 }
 
-/// GUIDE.md's words for a GPU that cannot be lent a slice.
-const NO_PAGEABLE: &str = "cuDeviceGetAttribute: the GPU cannot reach pageable memory, a slice of the host's: \
-                           its CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS is 0";
-
 /// GUIDE.md's words for a GPU that cannot make page-locked memory.
 const NO_PAGE_LOCKED: &str = "cuMemHostAlloc: the GPU cannot reach page-locked memory at the host's addresses: \
                               its CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING is 0";
-
-/// GUIDE.md's words for a GPU that cannot page-lock memory the host has, and for one that cannot reach it at the host's
-/// addresses.
-const NO_REGISTER: [&str; 2] = [
-    "cuMemHostRegister: the GPU cannot page-lock memory the host has: \
-     its CU_DEVICE_ATTRIBUTE_HOST_REGISTER_SUPPORTED is 0",
-    "cuMemHostRegister: the GPU cannot reach page-locked memory the host has at the host's addresses: \
-     its CU_DEVICE_ATTRIBUTE_CAN_USE_HOST_POINTER_FOR_REGISTERED_MEM is 0",
-];
-
-/// `cuda.register(slice)`; or `None` where the GPU cannot, after it says so in one of GUIDE.md's words, and the test is
-/// skipped, as for a machine with no GPU.
-fn register_or_skip<'a>(cuda: &Cuda, slice: &'a mut [u32]) -> Result<Option<Unified<'a, u32>>> {
-    match cuda.register(slice) {
-        Err(e) if NO_REGISTER.contains(&e.to_string().as_str()) => {
-            eprintln!("the GPU cannot: skipped. {e}");
-            Ok(None)
-        }
-        made => Ok(Some(made?)),
-    }
-}
 
 /// The host fills `m` with `input`, a kernel adds 1 to each word, and the host reads the sums, bit
 /// for bit, from the one address the kernel was given, with no copy and no `sync` of its own.

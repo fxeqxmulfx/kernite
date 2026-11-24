@@ -10,18 +10,10 @@ use std::time::Instant;
 use kernite_cuda::{Buffer, Cuda, Error, Module, Ptr, Stream, arg};
 
 mod gpu;
-use gpu::{SEEN, SETS, TIMED_OUT, WAITS, cuda, hold, launch, load, peek, poke, run};
+use gpu::{A_SECOND, A_TENTH, AT_ONCE, SEEN, SETS, TIMED_OUT, WAITS, cuda, hold, launch, load, peek, poke, run};
 
 type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
-/// How long `waits` waits for the flag, in nanoseconds, where it must see it: a second, much more than `sets` takes to
-/// run beside it. It returns as soon as it sees the flag, so the second is not spent.
-const A_SECOND: u64 = 1_000_000_000;
-/// And where it must not: a `sets` that ran beside it would write the flag at once, so a tenth of a second shows the
-/// same, and it is spent.
-const A_TENTH: u64 = 100_000_000;
-/// `sets` at once.
-const AT_ONCE: u64 = 0;
 /// How long `sets` waits before it writes the flag, where the host's call must wait for it: almost half a second.
 const A_LITTLE_WHILE: u64 = 400_000_000;
 /// And where another stream's kernel must be running still when the first one is done: a second.
