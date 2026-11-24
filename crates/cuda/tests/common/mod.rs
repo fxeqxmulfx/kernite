@@ -82,3 +82,24 @@ pub fn managed_or_skip<T>(made: Result<T, Error>) -> Option<T> {
     })
     .ok()
 }
+
+/// A kind of memory the host reaches that a copy takes, for the tests that go through each: managed, page-locked, and
+/// registered for good, `len` elements of each. A kind the GPU does not take is left out, after a line that says so. A
+/// slice that `lend` lent is not one: a copy refuses it, and `lent` makes one.
+pub fn kinds(cuda: &Cuda, len: usize) -> Result<Vec<(&'static str, Unified<'static, u32>)>, Error> {
+    let mut kinds = vec![("page-locked memory", cuda.pinned::<u32>(len)?)];
+    if let Some(managed) = managed_or_skip(cuda.managed::<u32>(len)) {
+        kinds.push(("managed memory", managed));
+    }
+    match cuda.register(Vec::leak(vec![0u32; len])) {
+        Ok(registered) => kinds.push(("a slice registered for good", registered)),
+        Err(e) => eprintln!("a GPU that page-locks no slice: none is registered. {e}"),
+    }
+    Ok(kinds)
+}
+
+/// `len` elements of a slice lent for good, if the GPU reaches pageable memory.
+pub fn lent(cuda: &Cuda, len: usize) -> Option<Unified<'static, u32>> {
+    let lent = cuda.lend(Vec::leak(vec![0u32; len]));
+    lent.inspect_err(|e| eprintln!("a GPU that reaches no pageable memory: no slice is lent. {e}")).ok()
+}

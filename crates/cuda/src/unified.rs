@@ -3,11 +3,13 @@
 use std::ffi::c_int;
 use std::fmt;
 use std::marker::PhantomData;
+use std::ops::RangeBounds;
 use std::ptr;
 use std::rc::Rc;
 use std::slice;
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU32, AtomicU64};
 
+use super::safe::{Part, bounds};
 use super::{Cuda, Driver, Error, Memory, MemoryMut, Plain, Ptr, bytes, sealed};
 
 mod placement;
@@ -652,6 +654,33 @@ impl<T: Atomic> Unified<'_, T> {
 }
 
 impl<T: Plain> Unified<'static, T> {
+    /// Its elements in `range`, borrowed, for a kernel that is no `unsafe fn` and a copy to be lent that part alone, as
+    /// [`Buffer::part`](super::Buffer::part) gives them: `xs.part(3..10)` is elements 3 to 9. It is for memory of
+    /// `'static` alone, as [`Memory`] is: a slice lent or registered for less would be the host's again at a
+    /// `mem::forget` of its `Unified`, with the kernel or the copy still to be done. `None` if `range` ends past the
+    /// end or before it starts.
+    ///
+    /// ```compile_fail,E0597
+    /// # let cuda = kernite_cuda::Cuda::new()?;
+    /// let mut xs = vec![1.0f32; 4];
+    /// let lent = cuda.lend(&mut xs)?;
+    /// let part = lent.part(1..3);
+    /// # Ok::<(), kernite_cuda::Error>(())
+    /// ```
+    pub fn part(&self, range: impl RangeBounds<usize>) -> Option<Part<&Unified<'static, T>>> {
+        let (from, len) = bounds(range, self.len)?;
+        Some(Part::new(self, self.at(from)?, len))
+    }
+
+    /// Its elements in `range`, borrowed mutably, for a kernel that is no `unsafe fn` and a copy to write that part
+    /// alone, as [`Buffer::part_mut`](super::Buffer::part_mut) gives them. The host holds no slice of the memory while
+    /// the part lasts. `None` if `range` ends past the end or before it starts.
+    pub fn part_mut(&mut self, range: impl RangeBounds<usize>) -> Option<Part<&mut Unified<'static, T>>> {
+        let (from, len) = bounds(range, self.len)?;
+        let at = self.at(from)?;
+        Some(Part::new(self, at, len))
+    }
+
     /// Sets every element to zero, on the current stream of its GPU, after the work that stream was given before, and
     /// does not wait for it. [`host`](Unified::host) and [`host_mut`](Unified::host_mut) wait for the zeros, as they
     /// wait for a kernel. It is for memory of `'static` alone, as [`Cuda::copy`] is: a slice lent or registered for
@@ -1404,10 +1433,12 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// The elements of a buffer from one on are lent with the address of that element and how many are left; a view
-    /// from its end is lent with none, and none starts past it.
+    /// A part of a buffer is lent with the address of its first element and how many it has; a part that ends where
+    /// the buffer does is lent as the elements from one on, a part at its end is lent with none, and none starts or
+    /// ends past it, or ends before it starts.
     #[test]
-    fn the_tail_of_a_buffer_is_lent_from_its_element_and_none_starts_past_its_end() -> Result {
+    #[expect(clippy::reversed_empty_ranges, reason = "a range back to front is what the test refuses")]
+    fn a_part_of_a_buffer_is_lent_from_its_element_for_its_count_and_none_reaches_past_the_end() -> Result {
         let cuda = gpu_with(&[], |api| {
             api.load_module = load_module;
             api.unload_module = unload_module;
@@ -1417,10 +1448,21 @@ pub(crate) mod tests {
         let buffer =
             Buffer::<u32> { driver: cuda.driver.clone(), ptr: 4096, len: 4, reservation: None, of: PhantomData };
         for (from, want) in [(0, (4096, 4)), (1, (4100, 3)), (4, (4112, 0))] {
-            let (at, left) = buffer.tail(from).ok_or("tail gave None")?.lend(&module)?;
+            let (at, left) = buffer.part(from..).ok_or("part gave None")?.lend(&module)?;
             assert_eq!((at.addr(), left), want, "from {from}");
         }
-        assert!(buffer.tail(5).is_none());
+        let lent = |part: Option<Part<&Buffer<u32>>>| -> Result<(u64, usize)> {
+            let (at, len) = part.ok_or("part gave None")?.lend(&module)?;
+            Ok((at.addr(), len))
+        };
+        assert_eq!(lent(buffer.part(1..3))?, (4100, 2));
+        assert_eq!(lent(buffer.part(..2))?, (4096, 2));
+        assert_eq!(lent(buffer.part(1..=2))?, (4100, 2));
+        assert_eq!(lent(buffer.part(..))?, (4096, 4));
+        assert_eq!(lent(buffer.part(2..2))?, (4104, 0));
+        for past in [buffer.part(5..), buffer.part(0..5), buffer.part(3..2), buffer.part(..=4)] {
+            assert!(past.is_none());
+        }
         Ok(())
     }
 
