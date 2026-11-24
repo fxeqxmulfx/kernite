@@ -8,10 +8,10 @@ use kernite::{Call, HostStatic, Naked, NativeInstance, NativeOut};
 
 use crate::cond::Cond;
 use crate::rust::{
-    Written, array_ref, asks, attrs, body_at, cfg_of, clashes, depends_on, ending_at, error_under, given_back,
+    Written, array_ref, asks, attrs, body_at, by_line, cfg_of, clashes, depends_on, ending_at, error_under, given_back,
     gives_placeholder, hygienic, launcher_result, missing, naked_levels, name_after, name_at, never, parse, pick,
-    pointer, position, primitive, probe, respan, result, signature, span_of, stub, unnamed, value_params, visibility,
-    within, written, written_params,
+    pointer, position, primitive, probe, respan, result, section_ends, shared_indent, signature, span_of, stub,
+    unnamed, value_params, visibility, within, written, written_params,
 };
 
 /// The crate the Rust of a static or a cooperative kernel names.
@@ -287,15 +287,19 @@ fn reached(
 /// `docs`, a kernel's attributes, with its safety contract: what it says of `named`, the memory of the module's that
 /// the kernel names, that nothing else touches it while the kernel runs, and, after it, of the CPU `features` its code
 /// needs, as [`needs`] says. A kernel that names no memory and needs no feature has none. Where the docs have no
-/// `# Safety`, the contract is one of its own, which says first, of a kernel that is an `unsafe fn`, that it trusts the
-/// pointers it is given; else it follows the one they have. It is located at `at`, a token of the user's: Clippy leaves
-/// out the attributes of a macro, and would ask the kernel for the `# Safety` that it has.
-fn contract(mut docs: TokenStream, named: &[String], features: &[String], safe: bool, at: Span) -> TokenStream {
+/// `# Safety`, the contract is one of its own, at the end of the docs, which says first, of a kernel that is an
+/// `unsafe fn`, that it trusts the pointers it is given; else its paragraphs are the last of the `# Safety` that the
+/// docs have, as [`section_ends`] says. It is located at `at`, a token of the user's: Clippy leaves out the attributes
+/// of a macro, and would ask the kernel for the `# Safety` that it has.
+fn contract(docs: TokenStream, named: &[String], features: &[String], safe: bool, at: Span) -> TokenStream {
     let needs = needs(features, safe);
     if named.is_empty() && needs.is_empty() {
         return docs;
     }
-    let own = !docs.to_string().contains("# Safety");
+    let mut docs = by_line(docs);
+    let safety = section_ends(&docs).1;
+    let space = " ".repeat(shared_indent(&docs));
+    let own = safety.is_none();
     let mut first = String::new();
     if own && !safe {
         first += "The kernel trusts the pointers it is given: each must be to memory as long as the kernel reads and \
@@ -306,16 +310,18 @@ fn contract(mut docs: TokenStream, named: &[String], features: &[String], safe: 
     }
     let mut written = String::new();
     if own {
-        written += "#[doc = \"\"]\n#[doc = \" # Safety\"]\n";
+        written += &format!("#[doc = \"\"]\n#[doc = \"{space}# Safety\"]\n");
     }
+    // A blank line after each paragraph, as before it, so that the docs' next line is no line of it.
     for paragraph in [first, needs] {
         let paragraph = paragraph.trim();
         if !paragraph.is_empty() {
-            written += &format!("#[doc = \"\"]\n#[doc = {:?}]\n", format!(" {paragraph}"));
+            written += &format!("#[doc = \"\"]\n#[doc = {:?}]\n#[doc = \"\"]\n", format!("{space}{paragraph}"));
         }
     }
-    docs.extend(respan(parse(&written), at));
-    docs
+    let end = safety.unwrap_or(docs.len());
+    docs.splice(end..end, respan(parse(&written), at));
+    docs.into_iter().collect()
 }
 
 /// `names` in words, each in backticks: `` `A` ``, `` `A` and `B` ``, `` `A`, `B` and `C` ``.
@@ -529,12 +535,14 @@ fn chosen(f: &Fn, arms: &[(Vec<Value>, String)], top: &[TokenTree]) -> String {
 /// pointer reaches the threads as the address it is, which each makes a pointer again, as
 /// Rust's pointers do not cross threads. Without `kernels`, it never runs, for a kernel that
 /// did not compile. Its safety contract says that nothing else touches `named`, the module's memory, while the threads
-/// run, and, after it, which CPU `features` the kernels need, as [`needs`] says.
-/// It binds `__kernite_grid` for itself, which a parameter of `f` may be named as well; a compile-time argument may
-/// not, which is an error at its name, after the function, under `cfg`, `f`'s own; and the function never runs, as one
-/// of a kernel that did not compile. In a crate without `kernite-cpu`, it takes any grid, gives [`missing`]'s type,
-/// with the error that says so after it, and never runs. Its result is [`launcher_result`]'s. Its body has the `places`
-/// of `f`'s code that Rust is told of by a statement, as [`naked`] says.
+/// run, and, after it, which CPU `features` the kernels need, as [`needs`] says: the last paragraphs of the `# Safety`
+/// that `f`'s docs have, or in one of its own, at the end of the docs, as [`section_ends`] says. Its paragraph on the
+/// threads of the grid comes before the docs' first heading, so that no heading of the user's has it. It binds
+/// `__kernite_grid` for itself, which a parameter of `f` may be named as well; a compile-time argument may not, which
+/// is an error at its name, after the function, under `cfg`, `f`'s own; and the function never runs, as one of a kernel
+/// that did not compile. In a crate without `kernite-cpu`, it takes any grid, gives [`missing`]'s type, with the error
+/// that says so after it, and never runs. Its result is [`launcher_result`]'s. Its body has the `places` of `f`'s code
+/// that Rust is told of by a statement, as [`naked`] says.
 fn grid_launcher(
     f: &Fn,
     kernels: Option<&[(Vec<Value>, String)]>,
@@ -546,32 +554,45 @@ fn grid_launcher(
 ) -> TokenStream {
     let clashes = clashes(f, cfg, &["__kernite_grid"], "the launcher", top);
     let kernels = if clashes.is_empty() { kernels } else { None };
-    let mut out = attrs(f, top);
-    out.extend(parse(
-        "#[doc = \"\"]\n#[doc = \" Every thread of the grid runs at once, as `grid.sync()` needs, each on a core, so a \
-         grid has at most as many threads as the process runs at once, [`kernite_cpu::most`]: the CPUs the caller's \
-         thread may run on, or fewer where a cgroup limits the process to fewer. More is an error.\"]",
-    ));
+    let mut docs = by_line(attrs(f, top));
+    let (lead, safety) = section_ends(&docs);
+    let space = " ".repeat(shared_indent(&docs));
     let memory = match named {
         [] => String::new(),
         named => format!(" Nothing else touches the module's memory, {}, while they run.", list(named)),
     };
-    if !out.to_string().contains("# Safety") {
-        out.extend(parse(&format!(
-            "#[doc = \"\"]\n#[doc = \" # Safety\"]\n#[doc = \"\"]\n#[doc = {:?}]",
+    // The contract is in the docs' `# Safety`, at its end; where they have none, in one of its own, at their end.
+    let mut added = String::new();
+    if safety.is_none() {
+        added += &format!(
+            "#[doc = \"\"]\n#[doc = \"{space}# Safety\"]\n#[doc = \"\"]\n#[doc = {:?}]\n#[doc = \"\"]\n",
             format!(
-                " The kernel trusts the pointers it is given: each must be to memory as long as the kernel's threads \
-                 read and write through it, which nothing else touches while they run.{memory}"
+                "{space}The kernel trusts the pointers it is given: each must be to memory as long as the kernel's \
+                 threads read and write through it, which nothing else touches while they run.{memory}"
             )
-        )));
+        );
     } else if !memory.is_empty() {
-        out.extend(parse(&format!("#[doc = \"\"]\n#[doc = {memory:?}]")));
+        let memory = format!("{space}{}", memory.trim_start());
+        added += &format!("#[doc = \"\"]\n#[doc = {memory:?}]\n#[doc = \"\"]\n");
     }
     // The launcher is an `unsafe fn`, as a cooperative kernel is.
     let needs = needs(features, false);
     if !needs.is_empty() {
-        out.extend(parse(&format!("#[doc = \"\"]\n#[doc = {:?}]", format!(" {needs}"))));
+        added += &format!("#[doc = \"\"]\n#[doc = {:?}]\n#[doc = \"\"]\n", format!("{space}{needs}"));
     }
+    let end = safety.unwrap_or(docs.len());
+    docs.splice(end..end, parse(&added));
+    // The grid's paragraph comes before the heading, so after the contract is added: that does not move it.
+    docs.splice(
+        lead..lead,
+        parse(&format!(
+            "#[doc = \"\"]\n#[doc = \"{space}Every thread of the grid runs at once, as `grid.sync()` needs, each on \
+             a core, so a grid has at most as many threads as the process runs at once, [`kernite_cpu::most`]: the \
+             CPUs the caller's thread may run on, or fewer where a cgroup limits the process to fewer. More is an \
+             error.\"]\n#[doc = \"\"]",
+        )),
+    );
+    let mut out: TokenStream = docs.into_iter().collect();
     // Clippy says "too many arguments" of a function of more than seven parameters wherever its
     // tokens come from, and the launcher takes the grid as well: so it allows that, and a crate of
     // kernels may not forbid `clippy::too_many_arguments`.

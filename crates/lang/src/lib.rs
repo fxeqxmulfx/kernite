@@ -130,7 +130,7 @@ pub use ast::{
 pub use eval::{Memory, Mention, Named, Run, constant, instance, instances, instructions, kernel, memory, param_types};
 pub use parse::{module, read};
 pub use target::{Fault, Guard, Mem, Operand, Target};
-pub use token::{Delim, Span, Tree, array_ref, lex, never_raw, pointer, read_type, text, unraw};
+pub use token::{Delim, Span, Tree, array_ref, lex, never_raw, pointer, read_type, text, unquote, unraw};
 pub use unicode::nfc;
 pub use value::{IntTy, Value, with_article};
 

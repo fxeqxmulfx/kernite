@@ -61,14 +61,14 @@ pub mod cpu {
     #[cooperative]
     pub unsafe extern "sysv64" fn together() {}
 
-    /// A kernel that needs `avx`, with no safety section.
+    /// A kernel that needs `avx`, with no `# Safety`.
     pub unsafe extern "sysv64" fn needs(p: *mut f32) {
         let v: ymm;
         vmovups(v, [p]);
         vmovups([p], v);
     }
 
-    /// A kernel that is no `unsafe fn` and needs `avx`, with no safety section: Rust has it as a function that is
+    /// A kernel that is no `unsafe fn` and needs `avx`, with no `# Safety`: Rust has it as a function that is
     /// unsafe to call where the caller does not have the feature.
     pub extern "sysv64" fn needs_safely(xs: &mut [f32; 8]) {
         let v: ymm;
@@ -76,7 +76,7 @@ pub mod cpu {
         vmovups([xs], v);
     }
 
-    /// Kernels of instances that need `avx`, with no safety section.
+    /// Kernels of instances that need `avx`, with no `# Safety`.
     #[instances(2, 3)]
     pub unsafe extern "sysv64" fn needs_many<const N: u64>(p: *mut f32) {
         let v: ymm;
@@ -84,7 +84,7 @@ pub mod cpu {
         vmovups([p + N], v);
     }
 
-    /// Kernels of instances that are no `unsafe fn` and need `avx`, with no safety section.
+    /// Kernels of instances that are no `unsafe fn` and need `avx`, with no `# Safety`.
     #[instances(8, 16)]
     pub extern "sysv64" fn needs_many_safely<const N: usize>(xs: &mut [f32; N]) {
         let v: ymm;
