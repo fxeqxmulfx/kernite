@@ -1,9 +1,10 @@
 # kernite-cpu
 
 kernite-cpu runs a `#[cooperative]` x86 kernel on the threads of a `Grid`, each given its place there, on any CPUs or on
-those the caller names, and keeps them spinning for the next launch for as long as the caller says. It also holds the
-memory of a module's statics, which the kernels and the host both reach. A crate of kernels adds it, beside
-`kernite-macros`, for either.
+those the caller names, and keeps them spinning for the next launch for as long as the caller says. `launch_blocks` runs
+a closure once for each of some blocks on them, each thread taking the next block when it ends one, so that a thread
+that comes late holds nothing back, and no block waits for another. It also holds the memory of a module's statics,
+which the kernels and the host both reach. A crate of kernels adds it, beside `kernite-macros`, for either.
 
 ```sh
 cargo add kernite-macros kernite-cpu

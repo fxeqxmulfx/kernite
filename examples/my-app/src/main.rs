@@ -1481,6 +1481,8 @@ fn main() -> Run {
 mod tests {
     use std::fs;
     use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
     use kernite_cuda::{Cuda, Grid, f16};
 
@@ -2137,6 +2139,41 @@ mod tests {
                     "{n} floats, {threads} threads placed"
                 );
             }
+        }
+        Ok(())
+    }
+
+    /// A cooperative launch and a launch of blocks each can follow the other on the same kept threads. The cpu's
+    /// `normalize`, whose threads wait for each other at `grid.sync()`, is the GPU's reference bit for bit only if
+    /// every thread comes to it, and does so after a launch of 0, 1, 2, 3 and 100 blocks, which leaves a thread late
+    /// or not woken, and before one; each block of each launch runs once.
+    #[test]
+    fn a_cooperative_launch_follows_a_launch_of_blocks_on_the_same_threads_and_the_reverse() -> Result {
+        super::supported()?;
+        let threads = threads()?;
+        // In [0.5, 1.5), so that the sum is far from 0.
+        let x: Vec<f32> = floats(10_000, 21).iter().map(|x| x / 2.0 + 1.0).collect();
+        let want: Vec<u32> = normalized(&x).iter().map(|v| v.to_bits()).collect();
+        let normalize = || -> Result {
+            let mut got = x.clone();
+            super::normalize_on_threads(&mut got, threads)?;
+            assert_eq!(got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), want, "{threads} threads");
+            Ok(())
+        };
+        let blocks = |blocks: u64| -> Result {
+            let ran = Arc::new(AtomicU64::new(0));
+            let into = Arc::clone(&ran);
+            kernite_cpu::launch_blocks(kernite_cpu::Grid::new(threads), blocks, move |_| {
+                into.fetch_add(1, Relaxed);
+            })?;
+            assert_eq!(ran.load(Relaxed), blocks, "blocks that ran");
+            Ok(())
+        };
+        for count in [0, 1, 2, 3, 100] {
+            blocks(count)?;
+            normalize()?;
+            normalize()?;
+            blocks(count)?;
         }
         Ok(())
     }
