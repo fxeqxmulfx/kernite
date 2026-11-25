@@ -21,7 +21,8 @@
 //! round of many in which no thread was delayed; a test of one that must not is sure of it whatever
 //! the machine does.
 
-use std::fs::File;
+use std::fs::{self, File};
+use std::hint::spin_loop;
 use std::io;
 use std::os::unix::fs::FileExt;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -29,7 +30,7 @@ use std::sync::{Arc, Barrier, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use kernite_cpu::{Grid, SPIN, cpus, launch, most};
+use kernite_cpu::{Grid, SPIN, cpus, launch, launch_blocks, most};
 
 type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
@@ -324,21 +325,110 @@ fn a_kept_thread_whose_spin_a_launch_ended_spins_again_after_the_next_launch_tha
     Ok(())
 }
 
+/// A launch that ends the spin of a kept thread, and uses it, leaves it spinning after: the spin it ends is the one
+/// that was to last after the launch before, and the launch's own grid says how long the thread spins after it. A round
+/// is three launches: the first puts the grid's three threads on the first three CPUs, the caller's on the first, and
+/// the second swaps the caller's thread and the first kept thread, which ends the spin of the kept thread and uses it;
+/// and the third, which is the second again, moves none, and finds the thread where it spun. In no round does the kept
+/// thread stop to wait early between the second and the third: a thread that the launch that uses it told to stop would
+/// sleep at once.
+#[test]
+fn a_launch_that_ends_the_spin_of_a_kept_thread_and_uses_it_leaves_it_spinning_after() -> Result {
+    let _alone = alone();
+    let Some(on) = four()? else { return Ok(()) };
+    let (first, swapped) = (Grid::on(&on[..THREADS]), [on[1], on[0]]);
+    let second = Grid::on(&swapped);
+    let mut counter = Counter::default();
+    let mut asleep_at_once = 0;
+    for _ in 0..ROUNDS {
+        counter.launch(first)?;
+        counter.launch(second)?;
+        // The first kept thread, at index 1.
+        asleep_at_once += usize::from(counter.launch(second)?[1]);
+    }
+    let message = "rounds found the kept thread stop to wait early after the launch that ended its spin and used it";
+    assert_eq!(asleep_at_once, 0, "{asleep_at_once} of {ROUNDS} {message}");
+    Ok(())
+}
+
+/// For how long the kept thread whose directory in `/proc/self/task` is `task` has used a CPU, as Linux counts it.
+fn used(task: &str) -> Result<Duration> {
+    let schedstat = fs::read_to_string(format!("/proc/self/task/{task}/schedstat"))?;
+    Ok(Duration::from_nanos(schedstat.split_whitespace().next().ok_or("next gave None")?.parse()?))
+}
+
+/// A kept thread that comes late to a launch of blocks rests as a launch that moves a thread onto its CPU says, as it
+/// does when it comes to a launch of threads on time: a launch that moves a thread first ends the spin of each kept
+/// thread on the CPU it moves to, however long the spin was to last, and a thread that was handed the launch before
+/// takes it after, and spins no more for it. A round is three launches:
+///
+/// - one whose grid says no spin, after which every kept thread sleeps;
+/// - a launch of three blocks, or of three threads, of a grid whose spin is long, which the kept threads, asleep, come
+///   to some microseconds after the caller has ended it, if it is of blocks;
+/// - a launch that moves the first kept thread onto the CPU of the second, which it does not use.
+///
+/// In no round does the second kept thread use half of the 30 ms after the third launch, which a thread that spins on
+/// uses all of.
+#[test]
+fn a_kept_thread_that_comes_late_to_a_launch_of_blocks_rests_as_a_later_launch_says() -> Result {
+    let _alone = alone();
+    let Some(on) = four()? else { return Ok(()) };
+    let window = Duration::from_millis(30);
+    let (long, asleep) = (Duration::from_millis(100), Grid::on(&on[..THREADS]).spin(Duration::ZERO));
+    let (three, two) = (Grid::on(&on[..THREADS]).spin(long), [on[0], on[2]]);
+    for blocks in [false, true] {
+        let what = if blocks { "a launch of blocks" } else { "a launch of threads" };
+        for round in 0..8 {
+            // The directory in `/proc/self/task` of the second kept thread, which it says as it runs.
+            let task = Arc::new(OnceLock::new());
+            let into = Arc::clone(&task);
+            launch(asleep, move |place| {
+                if place.thread() == 2 {
+                    let _ =
+                        into.set(fs::read_link("/proc/thread-self").map(|link| link.to_string_lossy().into_owned()));
+                }
+            })?;
+            let task = task.get().ok_or("no thread 2 ran")?.as_ref().map_err(|e| e.to_string())?;
+            let task = task.rsplit('/').next().ok_or("rsplit gave none")?;
+            thread::sleep(10 * GAP);
+            if blocks {
+                launch_blocks(three, THREADS as u64, |_| {})?;
+            } else {
+                launch(three, |_| {})?;
+            }
+            launch(Grid::on(&two).spin(Duration::ZERO), |_| {})?;
+            let before = used(task)?;
+            thread::sleep(window);
+            let spent = used(task)? - before;
+            assert!(
+                spent < window / 2,
+                "{what}, round {round}: the kept thread whose CPU a thread moved onto used {spent:?} of CPU in the \
+                 {window:?} after the launch that moved it, as a thread that spins on does"
+            );
+            // The spin of the launch ends, for the next round to begin with the thread asleep.
+            thread::sleep(long);
+        }
+    }
+    Ok(())
+}
+
 /// A kept thread waits for the next launch spinning for as long as its grid says, and then sleeps: not at all if the
 /// spin is nothing, 50 ms if it is 50 ms, and `SPIN` if the grid says none, whether the system places its threads or
-/// the caller does. A round is a sleep that outlasts the spin, and a launch, which counts what each kept thread did
-/// since the launch before.
+/// the caller does. A round is `under_test`, a launch of the grid in which each thread has a part, a sleep that
+/// outlasts the spin, and a launch that counts what each kept thread did since the launch before. The launches that
+/// count spin for nothing: one that left a thread spinning would give it the time until the next round's launch to
+/// spin, as well as the spin of that launch.
 ///
 /// A thread that spins uses half its spin in CPU at least, and stops to wait, in some round; in no round does it use
 /// more than its spin and some microseconds, nor is it told to stop early. A thread whose spin is nothing stops to wait
 /// after a few microseconds of CPU, with no thread taking its CPU, in some round: other work on the machine may give a
 /// thread its CPU late, which counts as taken, but never makes it stop early.
-#[test]
-fn a_kept_thread_spins_for_as_long_as_its_grid_says_and_then_sleeps() -> Result {
+fn kept_threads_wait_as_their_grids_say(under_test: impl Fn(Grid<'_>) -> Result) -> Result {
     let _alone = alone();
     let Some(on) = four()? else { return Ok(()) };
+    let on = on.first_chunk::<THREADS>().ok_or("four gave fewer CPUs than a grid has threads")?;
     let fifty = Duration::from_millis(50);
-    for (name, grid) in [("Grid::new", Grid::new(THREADS)), ("Grid::on", Grid::on(&on[..THREADS]))] {
+    for (name, grid) in [("Grid::new", Grid::new(THREADS)), ("Grid::on", Grid::on(on))] {
         // The grid, the spin it says, and how many rounds to make: a round of 50 ms lasts some 25 times as long.
         let cases = [
             ("a spin of nothing", grid.spin(Duration::ZERO), Duration::ZERO, ROUNDS),
@@ -346,13 +436,14 @@ fn a_kept_thread_spins_for_as_long_as_its_grid_says_and_then_sleeps() -> Result 
             ("no spin said", grid, SPIN, ROUNDS),
         ];
         for (what, grid, spin, rounds) in cases {
-            let mut counter = Counter::default();
+            let (mut counter, counting) = (Counter::default(), grid.spin(Duration::ZERO));
             // The first launch starts the threads, and counts them for the first time.
-            counter.launch(grid)?;
+            counter.launch(counting)?;
             let (mut told, mut spun) = (0, 0);
             for _ in 0..rounds {
+                under_test(grid)?;
                 thread::sleep(spin + GAP);
-                for since in counter.since(grid)?.into_iter().flatten() {
+                for since in counter.since(counting)?.into_iter().flatten() {
                     let used = since.cpu;
                     assert!(
                         used <= spin + SLACK,
@@ -377,6 +468,23 @@ fn a_kept_thread_spins_for_as_long_as_its_grid_says_and_then_sleeps() -> Result 
     Ok(())
 }
 
+/// A kept thread waits for the next launch of threads as its grid says.
+#[test]
+fn a_kept_thread_spins_for_as_long_as_its_grid_says_and_then_sleeps() -> Result {
+    kept_threads_wait_as_their_grids_say(|grid| Ok(launch(grid, |_| {})?))
+}
+
+/// A kept thread waits after a launch of blocks as its grid says, as after a launch of threads. The launch has as many
+/// blocks as the grid has threads, each waiting at a barrier for the others: each thread takes one, and the launch ends
+/// once each has, so that no thread comes to it late, after the next launch.
+#[test]
+fn a_kept_thread_spins_after_a_launch_of_blocks_for_as_long_as_its_grid_says() -> Result {
+    kept_threads_wait_as_their_grids_say(|grid| {
+        let barrier = Arc::new(Barrier::new(THREADS));
+        Ok(launch_blocks(grid, THREADS as u64, move |_| _ = barrier.wait())?)
+    })
+}
+
 /// How long the second thread of a launch of two takes: more than the `SPIN` the caller spins for, and less than the
 /// spin a grid says.
 const LATE: Duration = Duration::from_millis(1);
@@ -394,12 +502,11 @@ fn waited_for_the_second(grid: Grid<'_>, files: &(File, File)) -> Result<Since> 
 }
 
 /// The caller waits for the others to end spinning for as long as its grid says, as a kept thread waits for the next
-/// launch. The second thread of the launch takes longer than `SPIN` and less than 5 ms. With no spin said, the caller
-/// stops to wait in every round, for its spin ends before the second thread does. With a spin of 5 ms, in some of many
-/// rounds it does not stop to wait at all: other work on the machine may keep the second thread from ending in 5 ms,
-/// but never makes the caller stop early.
-#[test]
-fn the_caller_waits_for_the_others_spinning_for_as_long_as_its_grid_says() -> Result {
+/// launch. `waited` makes a launch of two threads whose other takes longer than `SPIN` and less than 5 ms, and says
+/// what the caller did while it waited. With no spin said, the caller stops to wait in every round, for its spin ends
+/// before the other thread does. With a spin of 5 ms, in some of many rounds it does not stop to wait at all: other
+/// work on the machine may keep the other thread from ending in 5 ms, but never makes the caller stop early.
+fn the_caller_waits_as_its_grid_says(waited: impl Fn(Grid<'_>, &(File, File)) -> Result<Since>) -> Result {
     let _alone = alone();
     if most()? < 2 {
         eprintln!("the process runs one thread at once: skipped");
@@ -408,24 +515,58 @@ fn the_caller_waits_for_the_others_spinning_for_as_long_as_its_grid_says() -> Re
     // The caller's own counts are exact: they are read as it runs.
     let files = (File::open("/proc/thread-self/status")?, File::open("/proc/thread-self/schedstat")?);
     // This launch starts the second thread, and a launch that starts one is not the one to count.
-    waited_for_the_second(Grid::new(2), &files)?;
+    waited(Grid::new(2), &files)?;
     for round in 0..ROUNDS {
-        let since = waited_for_the_second(Grid::new(2), &files)?;
+        let since = waited(Grid::new(2), &files)?;
         assert!(since.stopped > 0, "round {round}: the caller did not stop to wait for a thread that took {LATE:?}");
     }
     let grid = Grid::new(2).spin(Duration::from_millis(5));
-    let mut waited = false;
+    let mut did_not_stop = false;
     for _ in 0..TRIES {
-        waited = waited_for_the_second(grid, &files)?.stopped == 0;
-        if waited {
+        did_not_stop = waited(grid, &files)?.stopped == 0;
+        if did_not_stop {
             break;
         }
     }
     assert!(
-        waited,
+        did_not_stop,
         "the caller stopped to wait in each of {TRIES} rounds, for a thread that took {LATE:?}, with a spin of 5 ms"
     );
     Ok(())
+}
+
+/// The caller waits for the others to end spinning for as long as its grid says: the others are one thread, whose
+/// launch takes `LATE`.
+#[test]
+fn the_caller_waits_for_the_others_spinning_for_as_long_as_its_grid_says() -> Result {
+    the_caller_waits_as_its_grid_says(waited_for_the_second)
+}
+
+/// A launch of two blocks, one for each of two threads, of which the thread that is not the caller's takes `LATE` to
+/// end its own, and what the caller, whose files in `/proc` are `files`, did while it waited for the launch to end. The
+/// caller's block waits for the other thread to have begun its own, so that the caller has no block left to take, and
+/// the other thread's block ends last, whichever block each takes.
+fn waited_for_the_last_block(grid: Grid<'_>, files: &(File, File)) -> Result<Since> {
+    let before = Count::of(&files.0, &files.1)?;
+    let (caller, begun) = (thread::current().id(), Arc::new(AtomicU64::new(0)));
+    launch_blocks(grid, 2, move |_| {
+        if thread::current().id() == caller {
+            while begun.load(Relaxed) == 0 {
+                spin_loop();
+            }
+        } else {
+            begun.store(1, Relaxed);
+            thread::sleep(LATE);
+        }
+    })?;
+    Ok(Count::of(&files.0, &files.1)?.since(&before))
+}
+
+/// The caller of a launch of blocks waits for the last block to end spinning for as long as its grid says: the last is
+/// the block of the one other thread, whose block takes `LATE`.
+#[test]
+fn the_caller_of_a_launch_of_blocks_waits_for_the_last_block_spinning_for_as_long_as_its_grid_says() -> Result {
+    the_caller_waits_as_its_grid_says(waited_for_the_last_block)
 }
 
 /// A launch that moves a thread onto the CPU of a kept thread that was to spin for ten seconds ends that spin before it

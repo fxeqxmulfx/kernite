@@ -665,23 +665,46 @@ have ended. A thread that waits spins, so it needs a core: a grid of more thread
 
 The grid's other threads are kept. The first launch from a thread starts them, each with the stack Rust gives a thread,
 and the launches after it from that thread hand them the kernel and start none. On a Ryzen 5 5600H a launch of a kernel
-that returns at once costs 22 ns on one thread, which makes no system call, 0.2 microseconds on two, 0.8 on six and 2.3
-on twelve. A kept thread with no kernel to run spins for 200 microseconds, `kernite_cpu::SPIN`, for the next to come,
-and then sleeps, using no CPU, and the caller spins as long for each of the others to end. A launch that finds the
-threads asleep costs 5 microseconds on two threads, 9 on six and 16 on twelve, and some 100 when the machine has been
-idle for milliseconds, as the system wakes its cores. The threads end when the thread that launched does.
+that returns at once costs 50 ns on one thread, which makes no system call, and 0.2 microseconds on two, 1.0 on six and
+2.3 on twelve, placed one on each CPU, as the mean of ten hot runs of 20 000 launches, the middle one of three. A grid
+whose threads the system places costs 0.3 microseconds on two, 0.8 to 1.0 on six and 3.9 to 4.1 on twelve, where a batch
+of 20 000 costs from 2.1 to 12 a launch, though its median launch costs 2.1. A kept thread with no kernel to run spins
+for 200 microseconds, `kernite_cpu::SPIN`, for the next to come, and then sleeps, using no CPU, and the caller spins as
+long for each of the others to end. A launch that comes 0.4 milliseconds after the last, and finds the threads asleep,
+costs 6 microseconds on two threads, 11 on six and 17 to 18 on twelve, and 50 to 300 when the machine has been idle for
+2 milliseconds, as the system wakes its cores; these are medians of 400 launches. The threads end when the thread that
+launched does.
 
 A grid whose launches come further apart than 200 microseconds finds its threads asleep each time.
 `kernite_cpu::Grid::on(&cpus).spin(Duration::from_millis(10))` has its threads, the caller's too, spin for 10
 milliseconds in place of the 200 microseconds, so that a launch that comes within them finds the threads awake. On
-twelve threads placed one on each CPU, a launch of nothing that comes 0.4 milliseconds after the last costs 2.0
-microseconds with the spin, where back to back it costs 1.9, and 17.7 without; one that comes 5 milliseconds after costs
-2.3, and 392 without. A launch of 192 chunks of 2 microseconds each, which takes 72 back to back, takes 72 with the spin
-however far apart, and 85 and 350 without it, 0.4 and 5 milliseconds apart. These are medians: the slowest launch of
-nothing in a hundred, 5 milliseconds after the last, took 3 to 15 milliseconds with the spin, in three runs, and 0.8 to
-2 milliseconds without it. A spin costs CPU: each kept thread uses its CPU for the spin after each launch that uses it,
-whether another launch comes or not. A grid that launches once an hour spends 10 milliseconds of the CPU of each kept
-thread on each launch, and `Duration::ZERO` has its threads sleep at once.
+twelve threads placed one on each CPU, a launch of nothing that comes 0.4 milliseconds after the last costs 2.4
+microseconds with the spin, where back to back it costs 2.3, and 17.6 without; one that comes 5 milliseconds after costs
+2.5, and 371 without. A launch of 192 chunks of 2 microseconds each, which takes 72 back to back, takes 72 to 73 with
+the spin however far apart, and 85 and 354 without it, 0.4 and 5 milliseconds apart. These are medians of 1 000
+launches, the middle one of three runs; the slowest launch of nothing in a hundred, 5 milliseconds after the last, took
+4 microseconds to 1 millisecond with the spin and 0.7 to 2 milliseconds without it, in the three runs. A spin costs CPU:
+each kept thread uses its CPU for the spin after each launch that uses it, whether another launch comes or not. A grid
+that launches once an hour spends 10 milliseconds of the CPU of each kept thread on each launch, and `Duration::ZERO`
+has its threads sleep at once.
+
+A kernel whose blocks wait for none runs by `kernite_cpu::launch_blocks(grid, blocks, kernel)`: `kernel(block)`, a Rust
+closure, runs once for each `block` below `blocks`, on the threads of the grid, the caller's the first, and the launch
+returns when the last block has ended. Each thread takes the next block when it ends one, so a thread that the system
+has put aside holds the launch back by the block it has, and the others take the blocks it has not: a launch of threads
+waits for each of them. A thread that comes to a launch after its blocks have ended finds none, runs none, and lets go
+of the kernel, which it may be the last to hold, so the kernel is dropped on the thread that lets go of it last, which
+may be after the launch has returned. A panic in that drop is no launch's: the panic hook prints it, as it prints that
+of a thread that no one joins, and the thread goes on to the next launch. The kernel is given the index of its block and
+no place, so it has no `grid.sync()`: no block waits for another, and a block that waits for one taken later waits for
+ever, if every thread is in one. A launch of `n` blocks wakes `n - 1` threads at most, and none that has four launches
+waiting that it has not taken, whose blocks the others take. A block that panics ends the launch, once every block taken
+has ended, with its panic in the caller, the first if more than one panicked, and no block is taken after it. A launch
+of blocks and a launch of threads share the grid's kept threads, and each can follow the other. On twelve threads placed
+one on each CPU, a launch of 12 blocks that do nothing costs 1.2 microseconds back to back and 1.3 when it comes 100
+microseconds after the last, where a launch of threads costs 2.3 in both. These are medians: the slowest launch of
+blocks in a hundred costs 1.5 to 1.8 microseconds back to back and 1.6 when 100 apart, in three runs. A launch of 192
+blocks of 2 microseconds takes 72 microseconds.
 
 Where a grid's threads run is the system's to say, unless the caller places them. A `Grid::new(4)` runs each thread on
 any CPU the caller's thread may run on, and the system moves it from one to another as it likes. A
@@ -709,9 +732,10 @@ placement ask it nothing about CPUs. The first launch that places the caller's t
 placed none, also asks once which CPUs the thread may run on. A thread that may run on one CPU alone cannot run while
 another spins there, and a spin that no launch ends lasts as long as its grid said, 200 microseconds if it said none, so
 a launch that moves threads first ends the spin of each kept thread on a CPU a thread moves to, and of each the system
-places, however long it was to last: it sleeps until a launch uses it. A launch that moves none ends no spin. Kept
-threads of two callers that two placed grids put on one CPU share it while they spin, as any two threads on one CPU do:
-a launch waits for its thread to get the CPU, and not for the other's spin to end.
+places, however long it was to last: it sleeps until a launch uses it. So does a kept thread that takes a launch of
+blocks late, after this one has begun: it sleeps once it has let go of it, and does not spin for it. A launch that moves
+none ends no spin. Kept threads of two callers that two placed grids put on one CPU share it while they spin, as any two
+threads on one CPU do: a launch waits for its thread to get the CPU, and not for the other's spin to end.
 
 A page of memory is on the NUMA node of the CPU that first writes it, if that node has room, whichever thread asked for
 the buffer. `vec![0.0; n]`, for a large `n`, writes no page, so the first thread to write one gives it its node, and

@@ -25,7 +25,10 @@ release gives it its version.
 - kernite builds the PTX of a module of megabytes, or of many kernels (GitHub issue 1).
 - kernite finds a kernel's `# Safety` by its heading, as rustdoc does, and adds what it writes at the end of it.
 - kernite-cpu's threads wait spinning for as long as their grid says, `Grid::on(&cpus).spin(d)`: a launch of twelve
-  threads 5 ms after the last costs 2.3 microseconds, not 392.
+  threads 5 ms after the last costs 2.5 microseconds, not 371.
+- kernite-cpu runs a closure once for each block, on the threads of a grid, `launch_blocks(grid, n, kernel)`: a thread
+  the system puts aside holds the launch back by the block it has, and by no other. A launch of twelve threads costs
+  0.2 to 0.4 microseconds more for it, as each kept thread's queue now holds four launches at most.
 - Breaks: a safe GPU kernel reaches each element whole, and kernite refuses `ld.global.u16` through a `*const u32`, as
   the host may store the whole element while the kernel runs; kernite-cuda's `Cuda::concurrent_managed_access` is gone,
   with the clause of an `unsafe` launch's contract it served; kernite-cuda's `Buffer::tail` and `View` are gone, as
