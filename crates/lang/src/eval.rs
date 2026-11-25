@@ -995,7 +995,7 @@ impl<'a, T: Target> Eval<'a, T> {
         let mut merged: Vec<(T::Var, i64)> = vec![];
         for (v, k) in terms {
             match merged.iter_mut().find(|(u, _)| *u == v) {
-                Some((_, sum)) => *sum += k,
+                Some((_, sum)) => *sum = sum.checked_add(k).ok_or_else(|| overflow(span))?,
                 None => merged.push((v, k)),
             }
         }
@@ -1024,22 +1024,21 @@ impl<'a, T: Target> Eval<'a, T> {
                         (ta, da, tb, db)
                     }
                 };
-                let over = || err(*span, "this address overflows");
-                let scale = |terms: Vec<(T::Var, i64)>, by: i64| -> Result<Vec<(T::Var, i64)>, Error> {
-                    terms.into_iter().map(|(v, k)| k.checked_mul(by).map(|k| (v, k)).ok_or_else(over)).collect()
-                };
+                let over = || overflow(*span);
                 Ok(match op {
                     BinOp::Add => Lin::Sum([ta, tb].concat(), da.checked_add(db).ok_or_else(over)?),
-                    BinOp::Sub => Lin::Sum([ta, scale(tb, -1)?].concat(), da.checked_sub(db).ok_or_else(over)?),
-                    _ if ta.is_empty() => Lin::Sum(scale(tb, da)?, db.checked_mul(da).ok_or_else(over)?),
-                    _ if tb.is_empty() => Lin::Sum(scale(ta, db)?, da.checked_mul(db).ok_or_else(over)?),
+                    BinOp::Sub => Lin::Sum([ta, scale(tb, -1, *span)?].concat(), da.checked_sub(db).ok_or_else(over)?),
+                    _ if ta.is_empty() => Lin::Sum(scale(tb, da, *span)?, db.checked_mul(da).ok_or_else(over)?),
+                    _ if tb.is_empty() => Lin::Sum(scale(ta, db, *span)?, da.checked_mul(db).ok_or_else(over)?),
                     _ => return Err(err(*span, "an address multiplies a variable by a number, not by a variable")),
                 })
             }
             Expr::Paren(inner, _) => self.linear(inner),
             Expr::Unary(UnOp::Neg, inner, span) => match self.linear(inner)? {
                 Lin::Value(v) => value::unary(UnOp::Neg, &v).map(Lin::Value).map_err(|m| err(*span, m)),
-                Lin::Sum(terms, disp) => Ok(Lin::Sum(terms.into_iter().map(|(v, k)| (v, -k)).collect(), -disp)),
+                Lin::Sum(terms, disp) => {
+                    Ok(Lin::Sum(scale(terms, -1, *span)?, disp.checked_neg().ok_or_else(|| overflow(*span))?))
+                }
             },
             _ => match self.place(e)? {
                 Some(v) => Ok(Lin::Sum(vec![(v, 1)], 0)),
@@ -1468,6 +1467,16 @@ fn scalar<V>(v: &Value, span: Span) -> Result<Operand<V>, Error> {
         Value::Bool(_) => Err(err(span, "a bool is no operand")),
         Value::Array(_) => Err(err(span, "an array is data; in brackets, `[[..]]`, it is memory that holds it")),
     }
+}
+
+/// The error of an address that 64 bits do not hold, at `span`.
+fn overflow(span: Span) -> Error {
+    err(span, "this address overflows")
+}
+
+/// The terms of an address, each times `by`, or `this address overflows` at `span`.
+fn scale<V>(terms: Vec<(V, i64)>, by: i64, span: Span) -> Result<Vec<(V, i64)>, Error> {
+    terms.into_iter().map(|(v, k)| k.checked_mul(by).map(|k| (v, k)).ok_or_else(|| overflow(span))).collect()
 }
 
 /// An address's piece as variables and a number.

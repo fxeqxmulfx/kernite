@@ -562,6 +562,11 @@ impl Kernel {
             }
             // The table is declared before the instruction, under the name it has here.
             (Role::Labels, Given::Vector(labels)) => {
+                if labels.is_empty() {
+                    return Err(format!(
+                        "`{name}` jumps to one of labels taken together, at least one; this holds none"
+                    ));
+                }
                 for l in labels {
                     let Given::Label(l) = l else {
                         return Err(format!(

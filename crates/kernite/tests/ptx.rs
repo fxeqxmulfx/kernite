@@ -2392,6 +2392,8 @@ fn a_wrong_operand_is_named_by_what_ptx_lets_it_be() -> Result {
             "brx.idx(n, (a, n)); label(a);",
             "2:12: `brx.idx` jumps to one of labels taken together; this holds a `u32` variable",
         ),
+        ("brx.idx(n, ());", "2:12: `brx.idx` jumps to one of labels taken together, at least one; this holds none"),
+        ("brx.idx(1, ());", "2:12: `brx.idx` jumps to one of labels taken together, at least one; this holds none"),
         ("brx.idx(1, (a,)); label(a);", "2:9: `brx.idx` takes 0 here, the index of its one label; not 1"),
         (
             "brx.idx(2, (a, b)); label(a); label(b);",

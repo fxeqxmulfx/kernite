@@ -134,7 +134,7 @@ use crate::bounds::{self, Inside, Length};
 use crate::bytes;
 use crate::forms::{self, Form, Kind, Miss, Shape};
 use crate::op::Op;
-use crate::operand::ymm;
+use crate::operand::{constant_align, ymm};
 use crate::sysv::{CALL_CLOBBERS, FLOAT_PARAMS, FLOAT_RESULT, INT_PARAMS, INT_RESULT, PAGE, RAX, SysV};
 use crate::{order, widths};
 
@@ -1478,7 +1478,7 @@ impl Kernel {
 
     /// Read-only `bytes`, aligned to their size up to 32, stored once however often asked for.
     fn constant(&mut self, bytes: &[u8]) -> ConstId {
-        self.p.constant(bytes, (bytes.len() as u32).next_power_of_two().min(32))
+        self.p.constant(bytes, constant_align(bytes.len()))
     }
 
     fn ret(&mut self, args: &[Given<Var>]) -> Result<(), Fault> {

@@ -56,6 +56,18 @@ that name consts and a value's arrays each nest 64 deep at most, and each operat
 expression. A block, a `for` and an `if` are a level for what they hold, and count together with the expression inside
 them, along the helpers that call one another. [`kernite-lang`](crates/lang/src/lib.rs) describes the language.
 
+An integer known now is from -9223372036854775808 to 18446744073709551615 if it has no type, `200`, and from its type's
+least to its greatest if it has one, `200u8`. A sum, a difference, a product, a quotient, a remainder or a negation that
+is past it is an error at the operator, never a number that wrapped: `255 + 1` as a `u8` is "256 is out of range for
+u8". A shift of an integer with a type drops the bits that leave its width, as Rust's does, `3 << 63` as a `u64` is
+2^63, and so does a `!`: `!0` as a `u8` is 255. Those of one with no type are held to the range as the rest are:
+`(3 << 63) as u64` is "27670116110564327424 is out of range for an integer". The work is done in 128 bits, and where
+they cannot hold it, the error says that it overflows, with the operands:
+`18446744073709551615 * 18446744073709551615` is "18446744073709551615 * 18446744073709551615 overflows". So is the
+remainder of the least of a signed type by -1, `-128 % -1` of an `i8`, as in Rust, though it is 0: "-128 % -1
+overflows". Its quotient is "128 is out of range for i8". A shift is by 0 to one less than the bits of what it shifts,
+"a shift by 64 is not from 0 to 63".
+
 A helper is always inlined, and nothing else is, so `#[inline]` changes nothing kernite compiles: kernite refuses it, in
 every form, on a function or a static, at the `inline`. `#[inline(never)]`, `#[r#inline]` and
 `#[cfg_attr(.., inline(always))]`, whatever the condition, are refused as `#[inline]` is, and Rust says none of its own.
@@ -533,6 +545,15 @@ it runs; and a kernel that loads MXCSR stores the caller's first and loads it ba
 Where `llvm-mc` and GNU `as` are installed, a test hands them every form, with each integer the least the form takes and
 the most: `llvm-mc` must take it, and GNU `as` must take it at the feature kernite says it needs, without a warning, and
 refuse it at the features before.
+
+An address's numbers are of 64 bits, signed, on x86 and on a GPU, where the address is worked out the same. One that
+they do not hold is an error, "this address overflows", at the operator that leaves them:
+
+- `[x + 9223372036854775807 + 9223372036854775807]`, at its second `+`;
+- `[3 * (x + 4611686018427387904)]`, at its `*`;
+- `[-(x + -9223372036854775808)]`, at its first `-`;
+- `[x * 9223372036854775807 + x * 9223372036854775807]`, at its brackets, for the scales of a gpr that comes twice are
+  added there.
 
 An editor shows an instruction's doc where a kernel names it: hover at `vaddps` in rust-analyzer. The doc says what the
 instruction does, in a sentence of kernite's own; each form it takes, as a kernel writes it, `vaddps(=ymm, ymm,
@@ -1229,6 +1250,11 @@ address `mov.u64(fp, gcd)` put in `fp`. Each call is checked against what the fu
 of one that never returns, `-> !`, ends its caller's path there. A helper, a function without an ABI, is inlined
 instead, and leaves no call behind. `#[inline]` changes neither, and kernite refuses it on both.
 
+`brx.idx(n, (a, b, c))` jumps to the label that `n` picks from its table, `a` where `n` is 0. A table has one label at
+least: `brx.idx(n, ())` is an error at the table, as PTX's `.branchtargets` lists one label or more, and `ptxas`
+refuses a list of none. An index known now is one of the labels, for PTX leaves a bigger one undefined:
+`brx.idx(2, (a, b))` is an error at the index, "takes 0 to 1 here, the index of one of its 2 labels; 2 is not one".
+
 An instruction's name is Rust's words: a word that starts with a digit takes a `_`, a `::` is `__`, and a keyword
 takes `r#`, so `tex.2d` is `tex._2d`, `ld.global.L2::64B` is `ld.global.L2__64B`, and `cp.async` is `cp.r#async`. A
 texture or a surface is its handle, the `u64` of a CUDA texture or surface object, in brackets with its coordinates:
@@ -1379,7 +1405,10 @@ the memory lent for a pointer has the elements the kernel reaches, `x.len() >= n
 the memory it writes holds its bytes; and that no number the kernel works out wraps. The launcher checks each of them,
 and the grid, before the kernel runs. An error says which does not hold, as Rust writes it, with the value of each
 number in it, and no kernel runs: ``cuLaunchKernel: `saxpy` is safe on this launch only if `x.len() >= n`, so that each
-element it reaches of `x` is inside it, and that does not hold: `x.len()` is 999, `n` is 1000``.
+element it reaches of `x` is inside it, and that does not hold: `x.len()` is 999, `n` is 1000``. The proof holds each
+factor of a number in 127 bits and a sign, and does not follow a number that needs a bigger one: the least of
+`-2^126 * ntid.x - 2^126 * tid.x` over a launch is `-2^127 * ntid.x + 2^126`, so an address made of it is an error
+at the address, as for any number kernite does not follow.
 
 The grid of a safe kernel runs along x alone, with fewer than 2^32 threads, so that `ctaid.x * ntid.x + tid.x` numbers
 each of them apart in 32 bits. A grid with more than one block or thread along y or z is an error before the kernel

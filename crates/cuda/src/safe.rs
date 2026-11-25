@@ -137,8 +137,9 @@ impl Launch<'_> {
         }
     }
 
-    /// The term of `factor` times `quantities`, as Rust writes it.
-    fn term(&self, factor: i128, quantities: &[Quantity]) -> String {
+    /// The term of `factor` times `quantities`, as Rust writes it, where `factor` is the size of the term's factor: no
+    /// `i128` holds that of `i128::MIN`.
+    fn term(&self, factor: u128, quantities: &[Quantity]) -> String {
         let mut parts: Vec<String> = quantities.iter().map(|&q| self.name(q)).collect();
         if factor != 1 || parts.is_empty() {
             parts.insert(0, factor.to_string());
@@ -153,7 +154,7 @@ impl Launch<'_> {
                 .terms
                 .iter()
                 .filter(|(factor, _)| (*factor > 0) == above)
-                .map(|(factor, quantities)| self.term(factor.abs(), quantities))
+                .map(|(factor, quantities)| self.term(factor.unsigned_abs(), quantities))
                 .collect();
             if terms.is_empty() { "0".to_string() } else { terms.join(" + ") }
         };
@@ -315,6 +316,20 @@ mod tests {
         assert_eq!(launch.written(&r), "4 * x.len() + 2 >= grid.blocks[0] * grid.threads[0] + 4");
         assert_eq!(launch.sum(&r), Some(4 * 10 - 24 - 4 + 2));
         assert_eq!(launch.values(&r), "`x.len()` is 10, `grid.blocks[0]` is 3, `grid.threads[0]` is 8");
+    }
+
+    #[test]
+    fn a_factor_of_the_least_number_128_bits_hold_is_written_as_the_size_it_has() {
+        let r = Requirement { terms: &[(1, &[]), (i128::MIN, &[X])], why: Why::Fits };
+        let grid = Grid::new(1, 1);
+        let e = holds(&grid, "k", &NAMES, &[0, 4, 0, 0], &[r]).err().map(|e| e.message);
+        assert_eq!(
+            e.as_deref(),
+            Some(
+                "`k` is safe on this launch only if `1 >= 170141183460469231731687303715884105728 * x.len()`, so that \
+                 no number it works out wraps, and that does not hold: `x.len()` is 4"
+            )
+        );
     }
 
     #[test]

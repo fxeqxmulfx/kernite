@@ -8,7 +8,9 @@ use kernite_core::{
 };
 
 use crate::op::Op;
-use crate::operand::{Addr, Gpr, Hint, Slot, Src, Vector, Xmm, Ymm, arg, control, gpr, mem, number, src, vec};
+use crate::operand::{
+    Addr, Gpr, Hint, Slot, Src, Vector, Xmm, Ymm, arg, constant_align, control, gpr, mem, number, src, vec,
+};
 use crate::sysv::{FLOAT_RESULT, INT_PARAMS, PAGE};
 
 /// Instructions [`Asm::capture`] took out of a kernel, to [`Asm::splice`] back in.
@@ -148,8 +150,7 @@ impl Asm {
 
     /// `values` as bytes, aligned to their size up to 32.
     pub fn u8s(&mut self, values: &[u8]) -> Addr {
-        let align = (values.len() as u32).next_power_of_two().min(32);
-        self.constant(values, align)
+        self.constant(values, constant_align(values.len()))
     }
 
     /// `values` as little-endian 16-bit words.

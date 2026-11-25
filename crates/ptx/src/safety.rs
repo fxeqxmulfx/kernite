@@ -101,7 +101,8 @@ fn varies(atoms: &[Atom]) -> bool {
     atoms.iter().any(|a| matches!(a, Atom::Thread | Atom::Block))
 }
 
-/// A whole number, as a sum of products of atoms, each with its factor. No sum has a factor of 0.
+/// A whole number, as a sum of products of atoms, each with its factor. No sum has a factor of 0, nor of `i128::MIN`,
+/// whose negation and absolute value are past `i128`: each factor can be negated and divided by another.
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 struct Poly(BTreeMap<Vec<Atom>, i128>);
 
@@ -118,12 +119,12 @@ impl Poly {
         Poly::atom(Atom::Launch(q))
     }
 
-    /// `None` where a factor is past `i128`.
+    /// `None` where a factor is past `i128`, or is `i128::MIN`.
     fn add(&self, other: &Poly) -> Option<Poly> {
         let mut sum = self.0.clone();
         for (k, c) in &other.0 {
             let e = sum.entry(k.clone()).or_insert(0);
-            *e = e.checked_add(*c)?;
+            *e = e.checked_add(*c).filter(|&e| e != i128::MIN)?;
         }
         sum.retain(|_, c| *c != 0);
         Some(Poly(sum))
@@ -132,7 +133,7 @@ impl Poly {
     fn scale(&self, by: i128) -> Option<Poly> {
         let mut out = BTreeMap::new();
         for (k, c) in &self.0 {
-            out.insert(k.clone(), c.checked_mul(by)?);
+            out.insert(k.clone(), c.checked_mul(by).filter(|&c| c != i128::MIN)?);
         }
         out.retain(|_, c| *c != 0);
         Some(Poly(out))

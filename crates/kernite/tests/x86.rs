@@ -1177,11 +1177,11 @@ fn the_builder_writes_an_index_with_no_base() -> Result {
     a.lea(x, n.times(1)?);
     a.lea(x, n.times(2)?);
     a.lea(x, n.times(4)?);
-    a.lea(x, n.times(4)?.plus(8));
-    a.lea(x, n.times(8)?.plus(-8));
+    a.lea(x, n.times(4)?.plus(8)?);
+    a.lea(x, n.times(8)?.plus(-8)?);
     a.vpgatherdd(v, i.times(4)?, m);
     a.ones(m);
-    a.vpgatherdd(v, i.times(8)?.plus(-8), m);
+    a.vpgatherdd(v, i.times(8)?.plus(-8)?, m);
     a.ones(m);
     a.vpgatherdq(v, i.xmm().times(8)?, m);
     a.ret();
@@ -1349,11 +1349,24 @@ fn the_builder_refuses_what_x86_would_not_read() -> Result {
     assert_eq!(v.xmm().times(0).err().as_deref(), Some("scale 0"));
     assert_eq!(g.at(0).index(g, 4)?.index_ymm(v, 4).err().as_deref(), Some("one index to an address"));
     assert_eq!(a.u32s(&[1]).index(g, 4).err().as_deref(), Some("a constant's address takes no index"));
+    assert_eq!(g.at(i32::MAX).plus(1).err().as_deref(), Some("a displacement past 32 bits"));
+    assert_eq!(g.at(i32::MIN).plus(-1).err().as_deref(), Some("a displacement past 32 bits"));
+    assert_eq!(g.at(i32::MAX).plus(i32::MIN)?, g.at(-1));
     a.shl(g, 63);
     a.vextractf128(v.xmm(), v, 1);
     a.vpblendd(v, v, v, 0xff);
     a.vpblendd(v.xmm(), v.xmm(), v.xmm(), 0x0f);
     assert!(a.finish().is_ok());
+    Ok(())
+}
+
+/// A constant is aligned to its size up to 32, as many bytes as it has: one of more than 2 GiB is, and the program the
+/// builder finishes says so. It is the one case where the size, as a `u32`, has no power of 2 past it.
+#[test]
+fn the_builder_takes_a_constant_of_more_than_2_gib() -> Result {
+    let mut a = Asm::new("k");
+    a.u8s(&vec![0; (1 << 31) + 1]);
+    assert_eq!(a.finish()?.consts.iter().map(|c| c.align).collect::<Vec<_>>(), [32]);
     Ok(())
 }
 
