@@ -3,9 +3,11 @@
 //! with the CPU feature it needs. They are x86-64's own on integers, SSE's to SSE4.2's as AVX
 //! writes them, `vaddps` and not `addps`, and those of AVX, AVX2, FMA, F16C, BMI1, BMI2,
 //! LZCNT, POPCNT and MOVBE; not the stack's, which is the frame's, nor the strings', `loop`,
-//! x87's, MMX's or the system's. Those with registers of their own are not yet among them, as
-//! `mul` writes `rdx:rax`, `shl` shifts by `cl`, and `vzeroupper` clears every vector:
-//! [`LATER`] has each such instruction.
+//! x87's, MMX's or the system's. Most of those with registers of their own are not yet among
+//! them, as `mul` writes `rdx:rax`, `shl` shifts by `cl`, and `vzeroupper` clears every
+//! vector: [`LATER`] has each such instruction. `cmpxchg` is among them: a kernel names the
+//! variable it compares with as its last operand, and kernite places it in `rax`,
+//! [`Kind::Acc`].
 //!
 //! A form is a line of [`TABLE`]. [`of`] gives an instruction's forms, by the name the language
 //! calls it, and [`choose`] the one that operands fit, or why none does.
@@ -55,6 +57,11 @@ movnti [32 64] : =mN, rN
 lea : =r16/r32/r64, m
 xchg [8 16 32 64] : +rN/mN, +rN ; +rN, +mN
 xadd [8 16 32 64] : +rN/mN, +rN
+# `cmpxchg` compares the accumulator, which a kernel names as the last operand, with the first operand: where they
+# are equal it writes the second to the first, and where not it writes the first to the accumulator. Where not, of a
+# gpr's r32 as the first operand, Intel's manual writes it back, which clears the rest of the gpr, and AMD's CPUs
+# leave the gpr as it was.
+cmpxchg : +r8/m8, r8, +al ; +r16/m16, r16, +ax ; +r32/m32, r32, +eax ; +r64/m64, r64, +rax
 bswap [32 64] : +rN
 cmov$cc [16 32 64] : +rN, rN/mN
 set$cc : =r8/m8
@@ -105,6 +112,7 @@ lock.btc lock.btr lock.bts [16] : +mN, rN ; +mN, #0-15
 lock.btc lock.btr lock.bts [32] : +mN, rN ; +mN, #0-31
 lock.btc lock.btr lock.bts [64] : +mN, rN ; +mN, #0-63
 lock.xadd [8 16 32 64] : +mN, +rN
+lock.cmpxchg : +m8, r8, +al ; +m16, r16, +ax ; +m32, r32, +eax ; +m64, r64, +rax
 lock.xchg [8 16 32 64] : +mN, +rN ; +rN, +mN
 jmp j$cc : lab
 
@@ -262,14 +270,14 @@ vstmxcsr @avx : =m32
 "#;
 
 /// The instructions of x86-64-v3 kernite does not yet write, each with what it does that keeps
-/// it out: most reach registers of their own, which wait for kernite to place a kernel's variables
-/// in the registers such an instruction names, as it places a call's arguments. Of those in
-/// [`TABLE`], the forms of [`LATER_FORMS`] and shifts by `cl`, [`BY_CL`], wait so too.
+/// it out: most reach registers of their own, which wait for kernite to place a kernel's
+/// variables in the registers such an instruction names, as it places a call's arguments and
+/// `cmpxchg`'s accumulator, [`Kind::Acc`]. Of those in [`TABLE`], the forms of [`LATER_FORMS`]
+/// and shifts by `cl`, [`BY_CL`], wait so too.
 pub const LATER: &[(&str, &str)] = &[
     ("cbw", "widens `al` into `ax`"),
     ("cdq", "widens `eax` into `edx:eax`"),
     ("cdqe", "widens `eax` into `rax`"),
-    ("cmpxchg", "compares with `rax`, which it writes"),
     ("cmpxchg16b", "compares with `rdx:rax`, which it writes, and stores `rcx:rbx`"),
     ("cmpxchg8b", "compares with `edx:eax`, which it writes, and stores `ecx:ebx`"),
     ("cpuid", "reads `eax` and `ecx`, and writes them, `ebx` and `edx`"),
@@ -279,7 +287,6 @@ pub const LATER: &[(&str, &str)] = &[
     ("div", "divides `rdx:rax`, into `rax` and `rdx`"),
     ("idiv", "divides `rdx:rax`, into `rax` and `rdx`"),
     ("lahf", "loads the flags into `ah`"),
-    ("lock.cmpxchg", "compares with `rax`, which it writes"),
     ("mul", "multiplies `rax` into `rdx:rax`"),
     ("mulx", "multiplies by `rdx`"),
     ("rdtsc", "reads the time stamp into `edx:eax`"),
@@ -361,11 +368,17 @@ impl Feature {
     }
 }
 
+/// The accumulator at each width, by the name the table writes it.
+const ACC: [(&str, Width); 4] = [("al", W8), ("ax", W16), ("eax", W32), ("rax", W64)];
+
 /// What an operand of a form may be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     /// A general register at this width.
     Gpr(Width),
+    /// The accumulator at this width, `al`, `ax`, `eax` or `rax`, which the listing does not name: a kernel gives a gpr
+    /// for it, as the last operand, and kernite places that in `rax`.
+    Acc(Width),
     /// A vector register at this width. At less than 128 bits, an xmm of which the instruction reads the low so many
     /// bits as data, and no more, or, if it writes it, writes the low so many bits, and passes the rest of its first
     /// source on. The first source of such an instruction is an `xmm` where it reads none of it, as `vsqrtss` reads
@@ -429,7 +442,7 @@ impl Kind {
     /// Whether the language's operand `shape` fits it.
     pub fn fits(self, shape: Shape) -> bool {
         match (self, shape) {
-            (Kind::Gpr(w), Shape::Gpr(v)) => w == v,
+            (Kind::Gpr(w) | Kind::Acc(w), Shape::Gpr(v)) => w == v,
             (Kind::Vec(w), Shape::Vec(v)) => w.max(W128) == v,
             (Kind::Mem(w) | Kind::Aligned(w), Shape::Mem { size, vsib: None, .. }) => size.is_none_or(|s| s == w),
             (Kind::Addr, Shape::Mem { size: None, vsib: None, .. }) => true,
@@ -460,12 +473,13 @@ impl Kind {
         }
     }
 
-    /// What the table writes for it, as [`kind_of`] reads it: `r32`, `ymm`, `v64`, `m128`, `a256`, `m`, `vm32x`, `i8`,
-    /// `imm64`, `#0-31`, `#0x1f`, `lab`.
+    /// What the table writes for it, as [`kind_of`] reads it: `r32`, `eax`, `ymm`, `v64`, `m128`, `a256`, `m`, `vm32x`,
+    /// `i8`, `imm64`, `#0-31`, `#0x1f`, `lab`.
     pub(crate) fn text(self) -> String {
         let bits = |w: Width| w.bytes() * 8;
         match self {
             Kind::Gpr(w) => format!("r{}", bits(w)),
+            Kind::Acc(w) => ACC.iter().find(|(_, a)| *a == w).map_or("", |(name, _)| name).into(),
             Kind::Vec(W128) => "xmm".into(),
             Kind::Vec(W256) => "ymm".into(),
             Kind::Vec(w) => format!("v{}", bits(w)),
@@ -484,8 +498,8 @@ impl Kind {
     /// What it is, as a message names it: `a gpr's r32`, `4 bytes of memory`.
     fn noun(self) -> String {
         match self {
-            Kind::Gpr(W64) => "a gpr".into(),
-            Kind::Gpr(w) => format!("a gpr's r{}", w.bytes() * 8),
+            Kind::Gpr(W64) | Kind::Acc(W64) => "a gpr".into(),
+            Kind::Gpr(w) | Kind::Acc(w) => format!("a gpr's r{}", w.bytes() * 8),
             Kind::Vec(W256) => "a ymm".into(),
             Kind::Vec(_) => "an xmm".into(),
             Kind::Mem(w) | Kind::Aligned(w) => format!("{} of memory", crate::bytes(w.bytes().into())),
@@ -507,7 +521,7 @@ impl Kind {
     /// What it is of: a register, memory, an integer or a label.
     fn sort(self) -> u8 {
         match self {
-            Kind::Gpr(_) | Kind::Vec(_) => 0,
+            Kind::Gpr(_) | Kind::Acc(_) | Kind::Vec(_) => 0,
             Kind::Mem(_) | Kind::Aligned(_) | Kind::Addr | Kind::Vsib(..) => 1,
             Kind::Imm(_) | Kind::Imm64 | Kind::Range(..) | Kind::Control(_) => 2,
             Kind::Label => 3,
@@ -743,7 +757,9 @@ pub fn names() -> impl Iterator<Item = &'static str> {
 /// not have, as `ret`, and for one it has in no form its operands fit, which [`feature`] says.
 pub fn form<R: Register>(op: Op, args: &[Arg<R>], implicit: &[Arg<R>]) -> Option<&'static Form> {
     of(op.name())?.iter().find(|f| {
-        f.operands.len() == args.len() && f.operands.iter().zip(args).all(|(s, a)| s.kind.takes(&a.operand, implicit))
+        // The accumulator is not written out.
+        let written: Vec<&Spec> = f.operands.iter().filter(|s| !matches!(s.kind, Kind::Acc(_))).collect();
+        written.len() == args.len() && written.iter().zip(args).all(|(s, a)| s.kind.takes(&a.operand, implicit))
     })
 }
 
@@ -893,6 +909,9 @@ fn kind_of(t: &str, n: u32, line: &str) -> Result<Kind, String> {
         let (lo, hi) = r.split_once('-').ok_or_else(|| format!("`{line}`: no range `{t}`"))?;
         let parse = |x: &str| x.parse::<i64>().map_err(|_| format!("`{line}`: no range `{t}`"));
         return Ok(Kind::Range(parse(lo)?, parse(hi)?));
+    }
+    if let Some(&(_, w)) = ACC.iter().find(|&&(name, _)| name == t) {
+        return Ok(Kind::Acc(w));
     }
     match t.as_str() {
         "xmm" => return Ok(Kind::Vec(W128)),

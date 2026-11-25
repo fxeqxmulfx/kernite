@@ -511,22 +511,28 @@ out: a name that two items share, though each is under a `cfg` the other is not.
 The x86 target knows every instruction of x86-64-v3, in each form `llvm-mc` takes, [`forms`](crates/x86/src/forms.rs):
 x86-64's own on integers of 8 to 64 bits, SSE's to SSE4.2's as AVX writes them, `vaddps` and not `addps`, and AVX's,
 AVX2's, FMA's, F16C's, BMI1's, BMI2's, LZCNT's, POPCNT's and MOVBE's. It leaves out the stack's, which is the frame's,
-the strings', `loop`, x87's, MMX's and the system's; and it does not yet write those that take registers of their own,
-as `mul` takes `rax` and `rdx` and `shl` may take `cl`, which it names as such. A gpr is `g`, or `g.r32`, `g.r16` or
-`g.r8`, and a write to `r16` or `r8` keeps the rest of it, as x86 does. Memory is as much as the other operands say, or,
-where an instruction's forms differ by that alone, as Intel's word before the brackets says, `movzx(g.r32, byte[x])`,
-which kernite checks wherever it is given. An address is a base gpr, an index gpr times 1, 2, 4 or 8, and a number,
-`[x + i * 4 + 8]`. The base may be left out, `[i * 4 + 8]`, and x86 writes it so, with a 32-bit displacement. A gpr that
-comes twice has its scales added, so `[x + x * 3]` is `[x * 4]`. A gpr whose scales come to 0 is left out, so
-`[x + i * N]` is `[x]` where the const `N` is 0. With no base, a gpr times 3, 5 or 9 is that gpr added to itself times
-2, 4 or 8, as x86 has it: `[i * 5]` is `[i + i * 4]`. Any other scale is an error, `[x + i * 3]` or `[i * 6]`. A gather,
-`vpgatherdd(v, [x + i * 4], mask)`, has a vector of indices in `i`, and its base may be left out too, `[i * 4]`. It
-takes its result, indices and mask in three registers, as x86 faults otherwise. The listing's header and the function's
-`# Safety` name the CPU features a kernel needs, `# needs: avx, fma`, which nothing checks for when it runs; and a
-kernel that loads MXCSR stores the caller's first and loads it back before it returns, as SysV says. Where `llvm-mc` and
-GNU `as` are installed, a test hands them every form, with each integer the least the form takes and the most: `llvm-mc`
-must take it, and GNU `as` must take it at the feature kernite says it needs, without a warning, and refuse it at the
-features before.
+the strings', `loop`, x87's, MMX's and the system's; and it does not yet write most of those that take registers of
+their own, as `mul` takes `rax` and `rdx` and `shl` may take `cl`, which it names as such. It writes `cmpxchg` and
+`lock.cmpxchg`, which compare with `al`, `ax`, `eax` or `rax`. A kernel gives the variable it compares with as the last
+operand, a gpr of the width of the others, `lock.cmpxchg([p], new, old)`. kernite places it in `rax` as it places a
+call's argument, with a move to `rax` before the instruction and one back after it, each left out where the variable is
+in `rax` already; neither changes the flags, so a `jne` may follow. Where the compare finds the operands unequal, the
+instruction writes what the first operand held to the accumulator, so `old` holds it after. `cmpxchg` of a register
+writes both the first operand and the accumulator, which are two variables: `cmpxchg(g, h, g)` is an error. A gpr is
+`g`, or `g.r32`, `g.r16` or `g.r8`, and a write to `r16` or `r8` keeps the rest of it, as x86 does. Memory is as much as
+the other operands say, or, where an instruction's forms differ by that alone, as Intel's word before the brackets says,
+`movzx(g.r32, byte[x])`, which kernite checks wherever it is given. An address is a base gpr, an index gpr times 1, 2, 4
+or 8, and a number, `[x + i * 4 + 8]`. The base may be left out, `[i * 4 + 8]`, and x86 writes it so, with a 32-bit
+displacement. A gpr that comes twice has its scales added, so `[x + x * 3]` is `[x * 4]`. A gpr whose scales come to 0
+is left out, so `[x + i * N]` is `[x]` where the const `N` is 0. With no base, a gpr times 3, 5 or 9 is that gpr added
+to itself times 2, 4 or 8, as x86 has it: `[i * 5]` is `[i + i * 4]`. Any other scale is an error, `[x + i * 3]` or
+`[i * 6]`. A gather, `vpgatherdd(v, [x + i * 4], mask)`, has a vector of indices in `i`, and its base may be left out
+too, `[i * 4]`. It takes its result, indices and mask in three registers, as x86 faults otherwise. The listing's header
+and the function's `# Safety` name the CPU features a kernel needs, `# needs: avx, fma`, which nothing checks for when
+it runs; and a kernel that loads MXCSR stores the caller's first and loads it back before it returns, as SysV says.
+Where `llvm-mc` and GNU `as` are installed, a test hands them every form, with each integer the least the form takes and
+the most: `llvm-mc` must take it, and GNU `as` must take it at the feature kernite says it needs, without a warning, and
+refuse it at the features before.
 
 An editor shows an instruction's doc where a kernel names it: hover at `vaddps` in rust-analyzer. The doc says what the
 instruction does, in a sentence of kernite's own; each form it takes, as a kernel writes it, `vaddps(=ymm, ymm,

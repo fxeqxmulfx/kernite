@@ -1481,6 +1481,7 @@ fn main() -> Run {
 mod tests {
     use std::fs;
     use std::path::Path;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use kernite_cuda::{Cuda, Grid, f16};
 
@@ -1800,6 +1801,177 @@ mod tests {
         let overflowed = stderr.contains("thread 'deep'") && stderr.contains("has overflowed its stack");
         assert!(!out.status.success() && overflowed, "{stderr}");
         Ok(())
+    }
+
+    /// Kernels for the tests alone, which compare and exchange.
+    #[kernite_macros::kernels]
+    mod exchange {
+        /// Gives back the number `state` holds, and adds 1 to it in one atomic step, as a pool takes work: it loads
+        /// the number, and `lock.cmpxchg` replaces it with the next unless another thread has, where it goes round
+        /// with the number it found.
+        pub unsafe extern "sysv64" fn take(state: *mut u64) -> u64 {
+            let (old, new): (gpr, gpr);
+            mov(old, [state]);
+            label(again);
+            lea(new, [old + 1]);
+            lock.cmpxchg([state], new, old);
+            jne(again);
+            ret(old);
+        }
+
+        /// `take` with a call between the load and the `lock.cmpxchg`, which changes `rax`, so that `old` waits in
+        /// another register and moves to `rax` for the `lock.cmpxchg`, and back.
+        pub unsafe extern "sysv64" fn take_after_a_call(state: *mut u64) -> u64 {
+            let (old, new): (gpr, gpr);
+            mov(old, [state]);
+            call(writes_rax);
+            label(again);
+            lea(new, [old + 1]);
+            lock.cmpxchg([state], new, old);
+            jne(again);
+            ret(old);
+        }
+
+        /// Changes `rax`.
+        pub extern "sysv64" fn writes_rax() {
+            let t: gpr;
+            mov(t, 1);
+            add(t, t);
+        }
+
+        /// `lock.cmpxchg` of the byte at `p`: it holds `new` after if it held `old` before, and `old` gives back what
+        /// it held. Only the low byte of `old` and of `new` is read.
+        pub unsafe extern "sysv64" fn lock8(p: *mut u64, old: u64, new: u64) -> u64 {
+            lock.cmpxchg(byte[p], new.r8, old.r8);
+            ret(old);
+        }
+
+        /// `lock8` of the two bytes at `p`.
+        pub unsafe extern "sysv64" fn lock16(p: *mut u64, old: u64, new: u64) -> u64 {
+            lock.cmpxchg(word[p], new.r16, old.r16);
+            ret(old);
+        }
+
+        /// `lock8` of the four bytes at `p`.
+        pub unsafe extern "sysv64" fn lock32(p: *mut u64, old: u64, new: u64) -> u64 {
+            lock.cmpxchg(dword[p], new.r32, old.r32);
+            ret(old);
+        }
+
+        /// `lock8` of the eight bytes at `p`.
+        pub unsafe extern "sysv64" fn lock64(p: *mut u64, old: u64, new: u64) -> u64 {
+            lock.cmpxchg([p], new, old);
+            ret(old);
+        }
+
+        /// `cmpxchg` of the low byte of the register `cell`, which is stored at `out` after, and `old` gives back what
+        /// it held.
+        pub unsafe extern "sysv64" fn reg8(out: *mut u64, cell: u64, old: u64, new: u64) -> u64 {
+            cmpxchg(cell.r8, new.r8, old.r8);
+            mov([out], cell);
+            ret(old);
+        }
+
+        /// `reg8` of the low two bytes.
+        pub unsafe extern "sysv64" fn reg16(out: *mut u64, cell: u64, old: u64, new: u64) -> u64 {
+            cmpxchg(cell.r16, new.r16, old.r16);
+            mov([out], cell);
+            ret(old);
+        }
+
+        /// `reg8` of the low four bytes.
+        pub unsafe extern "sysv64" fn reg32(out: *mut u64, cell: u64, old: u64, new: u64) -> u64 {
+            cmpxchg(cell.r32, new.r32, old.r32);
+            mov([out], cell);
+            ret(old);
+        }
+
+        /// `reg8` of all eight.
+        pub unsafe extern "sysv64" fn reg64(out: *mut u64, cell: u64, old: u64, new: u64) -> u64 {
+            cmpxchg(cell, new, old);
+            mov([out], cell);
+            ret(old);
+        }
+    }
+
+    /// `threads` threads each take `each` numbers from one counter that starts at 0, by `take`: the counter after, and
+    /// how many times each number below `threads * each` was taken.
+    fn taken(take: unsafe extern "sysv64" fn(*mut u64) -> u64, threads: usize, each: usize) -> Result<(u64, Vec<u8>)> {
+        let counter = AtomicU64::new(0);
+        let taken: Vec<Vec<u64>> = std::thread::scope(|s| {
+            let spawned: Vec<_> = (0..threads)
+                .map(|_| {
+                    s.spawn(|| {
+                        // SAFETY: the counter is a `u64` that lives past the scope, which every thread changes only
+                        // through `take`, in atomic steps.
+                        (0..each).map(|_| unsafe { take(counter.as_ptr()) }).collect::<Vec<u64>>()
+                    })
+                })
+                .collect();
+            spawned.into_iter().map(|t| t.join().map_err(|_| "a thread panicked")).collect::<Result<_, _>>()
+        })?;
+        let mut times = vec![0u8; threads * each];
+        for number in taken.into_iter().flatten() {
+            let slot = times.get_mut(number as usize).ok_or_else(|| format!("{number} is past the end"))?;
+            *slot = slot.saturating_add(1);
+        }
+        Ok((counter.load(Ordering::SeqCst), times))
+    }
+
+    /// 12 threads take 1 000 000 numbers each from one counter, and the counter ends at 12 000 000 and each number
+    /// below it was taken once: no two took one, and none was skipped, as `lock.cmpxchg` takes the next number only
+    /// where the counter still holds the one that was loaded, and goes round with the new one where it does not. So
+    /// with a call between the load and the `lock.cmpxchg`, which moves the number to `rax` and back.
+    #[test]
+    fn twelve_threads_take_each_number_once() -> Result {
+        for take in [exchange::take, exchange::take_after_a_call] {
+            let (end, times) = taken(take, 12, 1_000_000)?;
+            assert_eq!(end, 12_000_000);
+            assert!(times.iter().all(|&n| n == 1), "a number was taken twice or never");
+        }
+        Ok(())
+    }
+
+    /// Each width of `lock.cmpxchg` of memory and of `cmpxchg` of a register compares as many bits as it is written
+    /// at, `al`, `ax`, `eax` or `rax` with it, and no more: where it holds `old` it holds `new` after, and where not it
+    /// is as it was; and `old` is what it held. The bits past the width, of memory, are as they were, and of a register
+    /// of 8 or 16 bits too. A register of 32 bits is given none: where the compare finds it unequal, Intel's manual
+    /// clears them and AMD's CPUs keep them.
+    #[test]
+    fn cmpxchg_compares_as_many_bits_as_it_is_written_at() {
+        type Memory = unsafe extern "sysv64" fn(*mut u64, u64, u64) -> u64;
+        type Register = unsafe extern "sysv64" fn(*mut u64, u64, u64, u64) -> u64;
+        // Each width's mask of the bits it reaches, and the kernels that compare at it.
+        let widths: [(u64, Memory, Register); 4] = [
+            (0xFF, exchange::lock8, exchange::reg8),
+            (0xFFFF, exchange::lock16, exchange::reg16),
+            (0xFFFF_FFFF, exchange::lock32, exchange::reg32),
+            (u64::MAX, exchange::lock64, exchange::reg64),
+        ];
+        // Bits past the width, which no compare of it reads and no write of it changes.
+        let pad = 0xA5A5_A5A5_A5A5_A5A5u64;
+        for (mask, lock, reg) in widths {
+            let (held, new) = (0x0123_4567_89AB_CDEF & mask, 0xFEDC_BA98_7654_3210 & mask);
+            // `old`: what is held, as it is in the bits that are compared and no other, then one bit off in the lowest
+            // of them, and in the highest.
+            let top = mask ^ (mask >> 1);
+            for (old, equal) in [(held, true), (held | !mask, true), (held ^ 1, false), (held ^ top, false)] {
+                let mut cell = pad & !mask | held;
+                // SAFETY: `cell` is a `u64` there to read and write, and x86 is little-endian, so the bytes the kernel
+                // reaches are the low ones of it.
+                let got = unsafe { lock(&mut cell, old, new) };
+                let want = pad & !mask | if equal { new } else { held };
+                assert_eq!((cell, got & mask), (want, held), "memory of {mask:#x}, old {old:#x}");
+                // The register a kernel compares is `cell`, with bits past its width where the CPUs agree on what
+                // becomes of them: of 8 and of 16 bits.
+                let cell = if mask < 0xFFFF_FFFF { pad & !mask | held } else { held };
+                let mut out = 0;
+                // SAFETY: `out` is a `u64` there to write.
+                let got = unsafe { reg(&mut out, cell, old, new) };
+                let want = cell & !mask | if equal { new } else { held };
+                assert_eq!((out, got & mask), (want, held), "register of {mask:#x}, old {old:#x}");
+            }
+        }
     }
 
     /// The GPU, and its kernels; on a machine with none, `None`, and the test is skipped.

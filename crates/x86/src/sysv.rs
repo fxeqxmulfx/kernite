@@ -11,6 +11,8 @@ const fn vec(hw: u8) -> PReg {
     PReg { class: Class::Vec, hw }
 }
 
+/// `rax`, the accumulator, which `cmpxchg` compares with.
+pub(crate) const RAX: PReg = gpr(0);
 pub(crate) const RSP: PReg = gpr(4);
 pub(crate) const RBP: PReg = gpr(5);
 
@@ -34,7 +36,7 @@ pub(crate) const FLOAT_PARAMS: [PReg; 8] = [vec(0), vec(1), vec(2), vec(3), vec(
 pub(crate) const FLOAT_RESULT: PReg = vec(0);
 
 /// Where an integer or pointer result goes back.
-pub(crate) const INT_RESULT: PReg = gpr(0);
+pub(crate) const INT_RESULT: PReg = RAX;
 
 /// The caller-saved registers first, so that a kernel that fits in them saves nothing. The
 /// stack pointer is never handed out, and neither is `rbp`, which holds the caller's stack
