@@ -75,7 +75,8 @@ use crate::call::{NO_PRED, Prototype, Returns, fits_param, formal};
 use crate::entry::{Entry, Op, Param};
 use crate::forms::{self, Bound, Check, Count, Imm, Part, Role, Space, Spec, TyRef};
 use crate::needs::Needs;
-use crate::safety::{self, Proof, Step};
+use crate::numbers::{Numbers, Step};
+use crate::safety::{self, Proof};
 use crate::statics::{Memory, Static, shape};
 use crate::ty::{Kind, Ty};
 use crate::var::Var;
@@ -136,6 +137,8 @@ pub struct Kernel {
     /// Each instruction of a kernel, by its place in the body, where a thread may end or never
     /// come back while others go on: a guarded `ret`, `exit` or `trap`, or a call.
     pub(crate) leaves: Vec<usize>,
+    /// What the kernel's numbers are, as its instructions come.
+    numbers: Numbers,
     /// For a kernel with no `unsafe`, what proves it safe as its instructions come.
     proof: Option<Proof>,
 }
@@ -247,6 +250,7 @@ impl Kernel {
             at: Span::default(),
             masks: vec![],
             leaves: vec![],
+            numbers: Numbers::new(),
             proof: None,
         }
     }
@@ -286,7 +290,7 @@ impl Kernel {
     /// Makes the kernel one with no `unsafe`, which kernite proves safe as its instructions come: an instruction that
     /// it cannot follow is an error, and what each launch must hold is in the [`Entry`].
     pub fn safe(&mut self) {
-        self.proof = Some(Proof::new());
+        self.proof = Some(Proof::default());
     }
 
     /// The kernel as written.
@@ -304,7 +308,7 @@ impl Kernel {
             func: self.func,
             calls: self.calls,
             directives: self.directives,
-            requires: self.proof.map(Proof::requires).unwrap_or_default(),
+            requires: self.proof.map(|_| self.numbers.requires()).unwrap_or_default(),
         }
     }
 
@@ -444,7 +448,10 @@ impl Kernel {
                 _ => None,
             })
             .collect();
-        proof.inst(&Step { name, bound: b, args, guard, written, reach: w.reach })
+        let step = Step { name, bound: b, args, guard, written, reach: w.reach };
+        proof.inst(&mut self.numbers, &step)?;
+        self.numbers.follow(&step);
+        Ok(())
     }
 
     /// Adds the instruction, under the predicate `guard` if there is one, held or not; keeping
@@ -1828,9 +1835,7 @@ impl Target for Kernel {
         self.p.params.push((reg, PReg { class: reg.class, hw: 0 }));
         self.p.signature.params.push(reg.class);
         self.named.insert(format!("{}_param_{}", self.p.name, self.params.len()));
-        if let Some(proof) = &mut self.proof {
-            proof.param(reg, self.params.len(), ty, t);
-        }
+        self.numbers.param(reg, self.params.len(), ty, t);
         self.params.push(Param { ty: t, reg: self.reg(reg).to_string(), pointer });
         Ok(Var::Reg { reg, ty: t })
     }
