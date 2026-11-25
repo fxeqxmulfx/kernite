@@ -36,7 +36,7 @@ comes:
      every public item documented.
    - **Size.** Commits of one step each, that build and pass, with each later fix folded into
      the commit it belongs to.
-   - **Goals,** CLAUDE.md's seven. Zero cost: a measured task's numbers are measured again by
+   - **Goals,** CLAUDE.md's eight. Zero cost: a measured task's numbers are measured again by
      the reviewer, through `bench.py`, beside the library's in the same sitting. Minimum code:
      no line the task does not need, no function that only hands a value on, nothing left dead.
      The whole spec: no form refused that the target encodes, checked with its tools where in
@@ -44,6 +44,8 @@ comes:
      one is a finding. The newest PTX: what the newest `ptxas` refuses is refused at every
      version and what it takes is taken, checked with it, and a module's `.version` is the
      oldest that has its instructions. Nothing deprecated: a form a target deprecates is refused.
+     Fast and deterministic tests: no test sleeps, waits for time to pass, or holds how long a
+     thing takes or how much CPU it uses; one that does is rewritten, not given more room.
 
    What only the hardware can settle, settle with a small program on this machine, not with a
    vendor's manual.

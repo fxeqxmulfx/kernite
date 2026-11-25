@@ -7,7 +7,7 @@ guarantees: read it before changing what kernite does.
 
 ## Goals
 
-Every change serves these seven.
+Every change serves these eight.
 
 1. **Zero cost.** A kernel runs as fast as the best code written by hand for it. kernite adds no
    check, copy or call at run time that the kernel does not ask for.
@@ -27,6 +27,12 @@ Every change serves these seven.
    oldest that has its instructions.
 7. **Nothing deprecated.** kernite refuses what a target deprecates, though its spec still has
    it: `shfl` and `vote` without `.sync`, which PTX deprecated in 6.0, say.
+8. **Fast and deterministic tests.** A test gives the same result on every run, however busy or
+   slow the machine is, and takes no longer than its work needs. It holds what happens, and in
+   what order, by flags, barriers, events and what the system says of a thread: never how long a
+   thing takes or how much CPU it uses, and it never sleeps for something to happen. A test whose
+   result depends on timing is a bad test: it is rewritten, not given more room. What a thing
+   costs is measured by a probe run alone, not by a test.
 
 ## Commands
 
