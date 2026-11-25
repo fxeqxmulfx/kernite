@@ -1159,6 +1159,22 @@ fn a_launch_over_a_block_the_kernel_refuses_says_the_directive_and_the_threads()
     Ok(())
 }
 
+/// The directives of a kernel are read from the PTX's text, which has comments the driver does not read: a `.maxntid`
+/// in one, of three sizes of 18446744073709551615, is more threads in all than 128 bits hold. A launch the driver
+/// refuses is still told by the GPU's limit, and the product of the sizes does not overflow.
+#[test]
+fn a_launch_is_refused_in_words_where_a_comment_has_directive_sizes_that_no_128_bits_hold() -> Result {
+    let Some(cuda) = cuda() else { return Ok(()) };
+    let comment = "// .maxntid 18446744073709551615, 18446744073709551615, 18446744073709551615";
+    let module = Module::load(&cuda, &counting(&[("k", comment)]), &["k"], &[])?;
+    let count = cuda.alloc::<u32>(1)?;
+    let grid = Grid { blocks: [1, 1, 1], threads: [2048, 1, 1], shared: 0 };
+    // SAFETY: the kernel takes a pointer, and adds to the word there, if it starts at all.
+    let e = unsafe { module.launch(0, grid, &[arg(&count.ptr())]) }.err().ok_or("value gave Ok")?;
+    refusal("cuLaunchKernel", &e, "each block has 2048 threads along x, and the GPU takes 1024 at most");
+    Ok(())
+}
+
 #[test]
 fn a_cooperative_launch_over_a_block_the_kernel_refuses_says_it_too() -> Result {
     let Some(cuda) = cuda() else { return Ok(()) };

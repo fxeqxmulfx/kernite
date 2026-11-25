@@ -133,9 +133,11 @@ impl Addr {
     /// No base, no index and no displacement: what an address that is an index alone starts as.
     const NOTHING: Addr = Addr { base: Base::None, index: None, disp: 0 };
 
-    /// `disp` bytes further on.
-    pub fn plus(self, disp: i32) -> Addr {
-        Addr { disp: self.disp + disp, ..self }
+    /// `disp` bytes further on. A displacement that no longer fits the 32 bits x86 writes it in is an error:
+    /// `a displacement past 32 bits`.
+    pub fn plus(self, disp: i32) -> Result<Addr, String> {
+        let disp = self.disp.checked_add(disp).ok_or("a displacement past 32 bits")?;
+        Ok(Addr { disp, ..self })
     }
 
     /// Plus `by` times `scale`. A scale other than 1, 2, 4 or 8, a second index, and an index on
@@ -239,4 +241,23 @@ pub(crate) fn number<R>(value: i64) -> Arg<R> {
 /// Whether `a` is all of a ymm, whose upper half an instruction that reads or writes it may set.
 pub(crate) fn ymm<R: Register>(a: &Arg<R>) -> bool {
     matches!(a.operand, Operand::Reg(r, Width::W256) if r.class() == Class::Vec)
+}
+
+/// What a constant of `len` bytes is aligned to: its size, rounded up to a power of 2, 32 at most. The size is cut to
+/// 32 first: a `u32` holds no power of 2 above 2^31, and a size past 2^32 is no `u32`.
+pub(crate) fn constant_align(len: usize) -> u32 {
+    (len.min(32) as u32).next_power_of_two()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::constant_align;
+
+    #[test]
+    fn a_constant_is_aligned_to_its_size_up_to_32_whatever_the_size() {
+        let sizes =
+            [0, 1, 2, 3, 4, 5, 8, 9, 16, 17, 31, 32, 33, 4096, 1 << 31, (1 << 31) + 1, (1 << 32) + 3, usize::MAX];
+        let aligns = sizes.map(constant_align);
+        assert_eq!(aligns, [1, 1, 2, 4, 4, 8, 8, 16, 16, 32, 32, 32, 32, 32, 32, 32, 32, 32]);
+    }
 }

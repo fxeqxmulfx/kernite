@@ -479,6 +479,55 @@ fn what_kernite_cannot_prove_safe_is_refused_unless_the_kernel_is_unsafe() -> Re
     Ok(())
 }
 
+/// The proof works with factors of 127 bits and a sign, and follows no number with a factor past them: `i128::MIN`
+/// is one, for its negation is. A kernel that makes the threads of a block and the index of a thread each -2^126 times
+/// as many, and adds them, makes a sum whose least over a launch, `-2^127 * ntid.x + 2^126`, has the factor -2^127:
+/// kernite does not follow the sum, and an address made of it is one it cannot follow, an error at the address, as for
+/// any number it does not follow. With -2^125 it follows the sum. A kernel that does nothing with the sum compiles, and
+/// so does the `unsafe fn` that it is, as it always did.
+#[test]
+fn the_proof_does_not_follow_a_number_with_a_factor_past_127_bits() -> Result {
+    // A kernel that works out `w`, `-2^power` times the threads of a block and the index of a thread, and takes `y`
+    // that far on, to store at, if it `uses` it.
+    let src = |power: u32, uses: bool| {
+        let mut lines =
+            ["let (n32, t32): (u32, u32);", "mov.u32(n32, ntid.x);", "mov.u32(t32, tid.x);"].map(String::from).to_vec();
+        lines.extend(
+            ["let (n, t, a, b, w): (u64, u64, u64, u64, u64);", "cvt.u64.u32(n, n32);", "cvt.u64.u32(t, t32);"]
+                .map(String::from),
+        );
+        for (name, from) in [("a", "n"), ("b", "t")] {
+            lines.push(format!("shl.b64({name}, {from}, {});", power - 63));
+            lines.push(format!("mul.lo.u64({name}, {name}, 9223372036854775808);"));
+            lines.push(format!("sub.u64({name}, 0, {name});"));
+        }
+        lines.push("add.u64(w, a, b);".to_string());
+        if uses {
+            lines.extend(
+                ["let (at, one): (u64, f32);", "add.u64(at, y, w);", "mov.f32(one, 1.0);", "st.global.f32([at], one);"]
+                    .map(String::from),
+            );
+        }
+        kernel("y: *mut f32", &lines.iter().map(String::as_str).collect::<Vec<_>>())
+    };
+    let store = "`st.global.f32` reaches";
+    let cases = [
+        (126, "memory at an address that kernite cannot follow to a pointer of the kernel's"),
+        (125, "an element at an index that no compare keeps below the memory's length"),
+    ];
+    for (power, error) in cases {
+        let src = src(power, true);
+        let want = format!("{}: {}", place(&src, "[at], one")?, cannot(&format!("{store} {error}")));
+        assert_eq!(requires(&src, "k").err().ok_or("requires gave Ok")?, want, "2^{power}\n{src}");
+    }
+    for power in [125, 126] {
+        let src = src(power, false);
+        requires(&src, "k").map_err(|e| format!("2^{power}: {e}"))?;
+        requires(&trusted(&src), "k").map_err(|e| format!("2^{power}, unsafe: {e}"))?;
+    }
+    Ok(())
+}
+
 /// What a launch holds, of each shape of a kernel that kernite proves safe: one thread that writes a place of its own;
 /// a thread for each row, which reads and writes the second float of its two; and a block for each row of 16 and a
 /// thread for each element of it. Each is a sum that is not negative: the memory is as long as the kernel reaches, the

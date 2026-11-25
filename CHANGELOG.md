@@ -31,10 +31,12 @@ release gives it its version.
   0.2 to 0.4 microseconds more for it, as each kept thread's queue now holds four launches at most.
 - kernite writes x86's `cmpxchg` and `lock.cmpxchg` of each width, and places the variable they compare with in `rax`,
   as it places a call's arguments: `lock.cmpxchg([p], new, old)`.
+- No number a user gives kernite makes it panic or wrap: an address that leaves 64 bits is an error at the operator,
+  `this address overflows`, and a `brx.idx` of no labels is an error at its table.
 - Breaks: a safe GPU kernel reaches each element whole, and kernite refuses `ld.global.u16` through a `*const u32`, as
   the host may store the whole element while the kernel runs; kernite-cuda's `Cuda::concurrent_managed_access` is gone,
   with the clause of an `unsafe` launch's contract it served; kernite-cuda's `Buffer::tail` and `View` are gone, as
-  `xs.part(i..)` does what `tail(i)` did.
+  `xs.part(i..)` does what `tail(i)` did; kernite-x86's `Addr::plus` gives a `Result`, as `times` and `index` do.
 
 ## 0.6.0 (2026-11-22)
 

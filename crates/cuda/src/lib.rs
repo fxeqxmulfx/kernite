@@ -589,8 +589,10 @@ impl Driver {
             let written: Vec<String> = sizes.iter().map(u128::to_string).collect();
             let who = format!("the kernel's `.{directive} {}`", written.join(", "));
             if *directive == "maxntid" {
-                // The driver weighs the threads of a block in all, not along each axis.
-                rows.push((tx * ty * tz, "each block has", "threads", who, 1, sizes.iter().product()));
+                // The driver weighs the threads of a block in all, not along each axis. A product past `u128` is more
+                // than any size is: sizes are read from the PTX's text, comments too, which the driver does not.
+                let all = sizes.iter().fold(1, |all: u128, &n| all.saturating_mul(n));
+                rows.push((tx * ty * tz, "each block has", "threads", who, 1, all));
             } else if grid.threads != [1, 1, 1] {
                 // The driver launches a block of one thread, whatever `.reqntid` says.
                 let along = [(tx, "threads along x"), (ty, "threads along y"), (tz, "threads along z")];
@@ -1231,7 +1233,7 @@ impl Module {
             if launched == 720
                 && let Ok(most) = self.resident(index, threads, grid.shared)
             {
-                let blocks = u64::from(bx) * u64::from(by) * u64::from(bz);
+                let blocks = u128::from(bx) * u128::from(by) * u128::from(bz);
                 e.message += &format!(": the grid has {blocks} blocks, and the GPU runs {most} of these at once");
             }
             e

@@ -722,7 +722,7 @@ impl<'a> Lexer<'a> {
                 self.pos += rest.find('\n').unwrap_or(rest.len());
             } else if rest.starts_with("/*") {
                 let start = self.span();
-                let mut depth = 0;
+                let mut depth = 0_usize;
                 loop {
                     let rest = self.rest();
                     if rest.starts_with("/*") {

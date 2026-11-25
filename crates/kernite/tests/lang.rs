@@ -2798,9 +2798,12 @@ fn errors_point_where_the_trouble_is() -> Result {
         ("two(1);", "1:1: `two` takes 2 arguments; this gives 1"),
         ("deep();", "5:13: helpers call helpers 64 deep here; does `deep` call itself?"),
         ("const X: u8 = 255 + 1;", "1:19: 256 is out of range for u8"),
+        ("const X: u8 = 0 - 1;", "1:17: -1 is out of range for u8"),
+        ("const X: u8 = 16 * 16;", "1:18: 256 is out of range for u8"),
         // A literal negated is one number, as Rust reads it: `-128i8` is in range.
         ("const X: i8 = -129;", "1:15: -129 is out of range for i8"),
         ("const X: i8 = -(128);", "1:17: 128 is out of range for i8"),
+        ("const X: i8 = -(-128);", "1:15: 128 is out of range for i8"),
         ("const X: u8 = -0;", "1:15: a u8 cannot be negated"),
         // A float too big for its type is out of range, as Rust has it, and not infinite.
         ("const F: f32 = 1e39;", "1:16: 1e39 is out of range for f32"),
@@ -3220,6 +3223,48 @@ fn the_least_of_each_signed_type_overflows_by_minus_one_under_a_remainder_as_und
     for (name, want) in cases {
         assert_eq!(value(&name)?, want, "{name}");
     }
+    Ok(())
+}
+
+/// An address's numbers are of 64 bits, signed. An address that they leave is an error, `this address overflows`, at
+/// the operator that leaves them, or at its brackets where the scales of one variable add up past them: a sum or a
+/// difference of displacements, a scale or a displacement times a number, a negation of either, and the scales of one
+/// variable that come twice. It is so on x86 and on a GPU, where the address is worked out the same. Where the sum is
+/// the greatest that 64 bits hold, it is an address, and x86 says what it says of any scale it does not take.
+#[test]
+fn an_address_that_64_bits_do_not_hold_is_an_error_at_its_operator() -> Result {
+    let most = "9223372036854775807";
+    let cases = [
+        // The scales of `x` that come twice, each the most.
+        (format!("x * {most} + x * {most}"), "["),
+        ("x * 4611686018427387904 + x * 4611686018427387904".to_string(), "["),
+        // A scale, or a displacement, that a product leaves them with.
+        ("x * 4611686018427387904 * 4".to_string(), "* 4]"),
+        ("3 * (x + 4611686018427387904)".to_string(), "* (x"),
+        // The negation of the least scale, or of the least displacement.
+        ("-(x * -9223372036854775808)".to_string(), "-(x"),
+        ("-(x + -9223372036854775808)".to_string(), "-(x"),
+        // A sum or a difference of displacements.
+        (format!("x + {most} + {most}"), &format!("+ {most}]")),
+        (format!("x - {most} - {most}"), &format!("- {most}]")),
+    ];
+    for (address, at) in cases {
+        let line = format!("let g: gpr; mov(g, [{address}]);");
+        let src = format!("unsafe extern \"sysv64\" fn k(x: u64) {{\n{line}\n}}\n");
+        let want = format!("2:{}: this address overflows", line.find(at).ok_or("find gave None")? + 1);
+        assert_eq!(compile(&src, "k").err().ok_or("compile gave Ok")?, want, "{address}");
+    }
+    // On a GPU the address is worked out as it is on x86.
+    let line = format!("let v: u32; ld.global.u32(v, [x + {most} + {most}]);");
+    let src = format!("unsafe extern \"ptx-kernel\" fn k(x: *mut u32) {{\n{line}\n}}\n");
+    let want = format!("2:{}: this address overflows", line.find(&format!("+ {most}]")).ok_or("find gave None")? + 1);
+    assert_eq!(compile(&src, "k").err().ok_or("compile gave Ok")?, want);
+    // The scales of `x` that come twice, `4611686018427387903 + 4611686018427387904`, make the most that 64 bits hold,
+    // so it is x86 that refuses the scale.
+    let line = "let g: gpr; mov(g, [x * 4611686018427387903 + x * 4611686018427387904]);";
+    let src = format!("unsafe extern \"sysv64\" fn k(x: u64) {{\n{line}\n}}\n");
+    let want = format!("2:20: x86 scales an index by 1, 2, 4 or 8, not {most}");
+    assert_eq!(compile(&src, "k").err().ok_or("compile gave Ok")?, want);
     Ok(())
 }
 
