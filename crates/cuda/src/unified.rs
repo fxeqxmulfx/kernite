@@ -185,11 +185,11 @@ impl Cuda {
     /// CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS is 0`. No call of the driver's is refused, so the
     /// error names the one that told.
     ///
-    /// The driver here, NVIDIA's open kernel module 615.71.10 on Linux 7.0, faults a kernel on an
-    /// element that has a guard page in its aligned 64 KiB, a page set with
-    /// `madvise(MADV_GUARD_INSTALL)`: the kernel fails with `CUDA_ERROR_ILLEGAL_ADDRESS (700)`, as
-    /// does every call after it. glibc 2.43 sets such a page below each thread's stack, so lend
-    /// the memory of a `Vec`, a `Box` or an anonymous mapping, and not an array on a thread's stack.
+    /// The driver here faults a kernel on an element that has a guard page in its aligned 64 KiB, a
+    /// page set with `madvise(MADV_GUARD_INSTALL)`: the kernel fails with
+    /// `CUDA_ERROR_ILLEGAL_ADDRESS (700)`, as does every call after it. glibc 2.43 sets such a page
+    /// below each thread's stack, so lend the memory of a `Vec`, a `Box` or an anonymous mapping,
+    /// and not an array on a thread's stack.
     ///
     /// ```no_run
     /// # use kernite_cuda::Cuda;
