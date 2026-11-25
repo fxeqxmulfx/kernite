@@ -33,6 +33,10 @@ release gives it its version.
   as it places a call's arguments: `lock.cmpxchg([p], new, old)`.
 - No number a user gives kernite makes it panic or wrap: an address that leaves 64 bits is an error at the operator,
   `this address overflows`, and a `brx.idx` of no labels is an error at its table.
+- The listing of a GPU kernel says, before the kernel, how many sectors of 32 bytes a warp moves for each load,
+  store, atomic and copy of global memory, and how many of their bytes it uses, and whether the launch reads any
+  byte of a pointer twice: `ld.global.f32 %xi, [%at_x]: 4 sectors for 128 bytes, all used`. A test holds the counts
+  to what `ncu` counts on the GPU.
 - Breaks: a safe GPU kernel reaches each element whole, and kernite refuses `ld.global.u16` through a `*const u32`, as
   the host may store the whole element while the kernel runs; kernite-cuda's `Cuda::concurrent_managed_access` is gone,
   with the clause of an `unsafe` launch's contract it served; kernite-cuda's `Buffer::tail` and `View` are gone, as

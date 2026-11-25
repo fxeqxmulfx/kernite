@@ -4,6 +4,7 @@
 .target sm_30
 .address_size 64
 
+// kernite does not follow a kernel that jumps yet: what its memory moves is not counted
 .visible .entry _ZN7kernite6matmul3gpu7kernels5sgemmILb1EEE(
 	.param .u64 _ZN7kernite6matmul3gpu7kernels5sgemmILb1EEE_param_0,
 	.param .u64 _ZN7kernite6matmul3gpu7kernels5sgemmILb1EEE_param_1,
@@ -1031,6 +1032,7 @@ $L3:
 	ret;
 }
 
+// kernite does not follow a kernel that jumps yet: what its memory moves is not counted
 .visible .entry _ZN7kernite6matmul3gpu7kernels5sgemmILb0EEE(
 	.param .u64 _ZN7kernite6matmul3gpu7kernels5sgemmILb0EEE_param_0,
 	.param .u64 _ZN7kernite6matmul3gpu7kernels5sgemmILb0EEE_param_1,

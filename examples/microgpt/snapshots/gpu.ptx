@@ -4,6 +4,13 @@
 .target sm_30
 .address_size 64
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.u32 %tok, [%at]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %a, [%at_1]: not counted, as its address comes from a value loaded from memory
+//   ld.global.f32 %b, [%at_2]: 4 sectors for 128 bytes, all used
+//   st.global.f32 [%at_3], %a: 4 sectors for 128 bytes, all used
+//   p: not told how many times a byte is read, as a load of it is not counted
+//   tokens: each byte is read at most once by every thread of a block
 .visible .entry _ZN7kernite8microgpt3gpu7kernels5embedE(
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels5embedE_param_0,
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels5embedE_param_1,
@@ -41,6 +48,41 @@
 	ret;
 }
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.f32 %v0, [%xs]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %v1, [%xs+4]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %v2, [%xs+8]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %v3, [%xs+12]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %v4, [%xs+16]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %v5, [%xs+20]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %v6, [%xs+24]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %v7, [%xs+28]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %v8, [%xs+32]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %v9, [%xs+36]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %v10, [%xs+40]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %v11, [%xs+44]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %v12, [%xs+48]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %v13, [%xs+52]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %v14, [%xs+56]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %v15, [%xs+60]: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%at], %s: 4 sectors for 128 bytes, all used
+//   st.global.f32 [%ys], %v0: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ys+4], %v1: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ys+8], %v2: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ys+12], %v3: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ys+16], %v4: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ys+20], %v5: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ys+24], %v6: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ys+28], %v7: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ys+32], %v8: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ys+36], %v9: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ys+40], %v10: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ys+44], %v11: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ys+48], %v12: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ys+52], %v13: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ys+56], %v14: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ys+60], %v15: 32 sectors for 128 bytes, an eighth used
+//   x: each byte is read at most once by every block
 .visible .entry _ZN7kernite8microgpt3gpu7kernels7rmsnormE(
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels7rmsnormE_param_0,
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels7rmsnormE_param_1,
@@ -139,6 +181,42 @@
 	ret;
 }
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.f32 %xi, [%xs]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi, [%ws]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_1, [%xs+4]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_1, [%ws+192]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_2, [%xs+8]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_2, [%ws+384]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_3, [%xs+12]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_3, [%ws+576]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_4, [%xs+16]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_4, [%ws+768]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_5, [%xs+20]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_5, [%ws+960]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_6, [%xs+24]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_6, [%ws+1152]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_7, [%xs+28]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_7, [%ws+1344]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_8, [%xs+32]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_8, [%ws+1536]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_9, [%xs+36]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_9, [%ws+1728]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_10, [%xs+40]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_10, [%ws+1920]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_11, [%xs+44]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_11, [%ws+2112]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_12, [%xs+48]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_12, [%ws+2304]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_13, [%xs+52]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_13, [%ws+2496]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_14, [%xs+56]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_14, [%ws+2688]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_15, [%xs+60]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_15, [%ws+2880]: 4 sectors for 128 bytes, all used
+//   st.global.f32 [%at], %acc: 4 sectors for 128 bytes, all used
+//   x: each byte is read at most once by every thread of a block
+//   w: each byte is read at most 16 times by every block
 .visible .entry _ZN7kernite8microgpt3gpu7kernels3qkvE(
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels3qkvE_param_0,
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels3qkvE_param_1,
@@ -221,6 +299,44 @@
 	ret;
 }
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.f32 %xi, [%xs]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi, [%ws]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_1, [%xs+4]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_1, [%ws+64]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_2, [%xs+8]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_2, [%ws+128]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_3, [%xs+12]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_3, [%ws+192]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_4, [%xs+16]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_4, [%ws+256]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_5, [%xs+20]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_5, [%ws+320]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_6, [%xs+24]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_6, [%ws+384]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_7, [%xs+28]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_7, [%ws+448]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_8, [%xs+32]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_8, [%ws+512]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_9, [%xs+36]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_9, [%ws+576]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_10, [%xs+40]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_10, [%ws+640]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_11, [%xs+44]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_11, [%ws+704]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_12, [%xs+48]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_12, [%ws+768]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_13, [%xs+52]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_13, [%ws+832]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_14, [%xs+56]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_14, [%ws+896]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_15, [%xs+60]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_15, [%ws+960]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %r, [%at]: 4 sectors for 128 bytes, all used
+//   st.global.f32 [%at_1], %acc: 4 sectors for 128 bytes, all used
+//   x: each byte is read at most once by every thread of a block
+//   w: each byte is read at most 16 times by every block
+//   res: not told how many times a byte is read, as its blocks may read the same bytes
 .visible .entry _ZN7kernite8microgpt3gpu7kernels2woE(
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels2woE_param_0,
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels2woE_param_1,
@@ -309,6 +425,42 @@
 	ret;
 }
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.f32 %xi, [%xs]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi, [%ws]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_1, [%xs+4]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_1, [%ws+256]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_2, [%xs+8]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_2, [%ws+512]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_3, [%xs+12]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_3, [%ws+768]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_4, [%xs+16]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_4, [%ws+1024]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_5, [%xs+20]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_5, [%ws+1280]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_6, [%xs+24]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_6, [%ws+1536]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_7, [%xs+28]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_7, [%ws+1792]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_8, [%xs+32]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_8, [%ws+2048]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_9, [%xs+36]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_9, [%ws+2304]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_10, [%xs+40]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_10, [%ws+2560]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_11, [%xs+44]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_11, [%ws+2816]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_12, [%xs+48]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_12, [%ws+3072]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_13, [%xs+52]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_13, [%ws+3328]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_14, [%xs+56]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_14, [%ws+3584]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_15, [%xs+60]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_15, [%ws+3840]: 4 sectors for 128 bytes, all used
+//   st.global.f32 [%at], %acc: 4 sectors for 128 bytes, all used
+//   x: each byte is read at most once by every thread of a block
+//   w: each byte is read at most 16 times by every block
 .visible .entry _ZN7kernite8microgpt3gpu7kernels3fc1E(
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels3fc1E_param_0,
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels3fc1E_param_1,
@@ -394,6 +546,140 @@
 	ret;
 }
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.f32 %xi, [%xs]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi, [%ws]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_1, [%xs+4]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_1, [%ws+64]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_2, [%xs+8]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_2, [%ws+128]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_3, [%xs+12]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_3, [%ws+192]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_4, [%xs+16]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_4, [%ws+256]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_5, [%xs+20]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_5, [%ws+320]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_6, [%xs+24]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_6, [%ws+384]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_7, [%xs+28]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_7, [%ws+448]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_8, [%xs+32]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_8, [%ws+512]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_9, [%xs+36]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_9, [%ws+576]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_10, [%xs+40]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_10, [%ws+640]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_11, [%xs+44]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_11, [%ws+704]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_12, [%xs+48]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_12, [%ws+768]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_13, [%xs+52]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_13, [%ws+832]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_14, [%xs+56]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_14, [%ws+896]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_15, [%xs+60]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_15, [%ws+960]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_16, [%xs+64]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_16, [%ws+1024]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_17, [%xs+68]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_17, [%ws+1088]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_18, [%xs+72]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_18, [%ws+1152]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_19, [%xs+76]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_19, [%ws+1216]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_20, [%xs+80]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_20, [%ws+1280]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_21, [%xs+84]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_21, [%ws+1344]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_22, [%xs+88]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_22, [%ws+1408]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_23, [%xs+92]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_23, [%ws+1472]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_24, [%xs+96]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_24, [%ws+1536]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_25, [%xs+100]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_25, [%ws+1600]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_26, [%xs+104]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_26, [%ws+1664]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_27, [%xs+108]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_27, [%ws+1728]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_28, [%xs+112]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_28, [%ws+1792]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_29, [%xs+116]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_29, [%ws+1856]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_30, [%xs+120]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_30, [%ws+1920]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_31, [%xs+124]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_31, [%ws+1984]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_32, [%xs+128]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_32, [%ws+2048]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_33, [%xs+132]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_33, [%ws+2112]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_34, [%xs+136]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_34, [%ws+2176]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_35, [%xs+140]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_35, [%ws+2240]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_36, [%xs+144]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_36, [%ws+2304]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_37, [%xs+148]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_37, [%ws+2368]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_38, [%xs+152]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_38, [%ws+2432]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_39, [%xs+156]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_39, [%ws+2496]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_40, [%xs+160]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_40, [%ws+2560]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_41, [%xs+164]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_41, [%ws+2624]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_42, [%xs+168]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_42, [%ws+2688]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_43, [%xs+172]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_43, [%ws+2752]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_44, [%xs+176]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_44, [%ws+2816]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_45, [%xs+180]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_45, [%ws+2880]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_46, [%xs+184]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_46, [%ws+2944]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_47, [%xs+188]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_47, [%ws+3008]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_48, [%xs+192]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_48, [%ws+3072]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_49, [%xs+196]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_49, [%ws+3136]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_50, [%xs+200]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_50, [%ws+3200]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_51, [%xs+204]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_51, [%ws+3264]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_52, [%xs+208]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_52, [%ws+3328]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_53, [%xs+212]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_53, [%ws+3392]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_54, [%xs+216]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_54, [%ws+3456]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_55, [%xs+220]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_55, [%ws+3520]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_56, [%xs+224]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_56, [%ws+3584]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_57, [%xs+228]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_57, [%ws+3648]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_58, [%xs+232]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_58, [%ws+3712]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_59, [%xs+236]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_59, [%ws+3776]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_60, [%xs+240]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_60, [%ws+3840]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_61, [%xs+244]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_61, [%ws+3904]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_62, [%xs+248]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_62, [%ws+3968]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_63, [%xs+252]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_63, [%ws+4032]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %r, [%at]: 4 sectors for 128 bytes, all used
+//   st.global.f32 [%at_1], %acc: 4 sectors for 128 bytes, all used
+//   x: each byte is read at most once by every thread of a block
+//   w: each byte is read at most 64 times by every block
+//   res: not told how many times a byte is read, as its blocks may read the same bytes
 .visible .entry _ZN7kernite8microgpt3gpu7kernels3fc2E(
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels3fc2E_param_0,
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels3fc2E_param_1,
@@ -638,6 +924,42 @@
 	ret;
 }
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.f32 %xi, [%xs]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi, [%ws]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_1, [%xs+4]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_1, [%ws+128]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_2, [%xs+8]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_2, [%ws+256]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_3, [%xs+12]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_3, [%ws+384]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_4, [%xs+16]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_4, [%ws+512]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_5, [%xs+20]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_5, [%ws+640]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_6, [%xs+24]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_6, [%ws+768]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_7, [%xs+28]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_7, [%ws+896]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_8, [%xs+32]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_8, [%ws+1024]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_9, [%xs+36]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_9, [%ws+1152]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_10, [%xs+40]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_10, [%ws+1280]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_11, [%xs+44]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_11, [%ws+1408]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_12, [%xs+48]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_12, [%ws+1536]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_13, [%xs+52]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_13, [%ws+1664]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_14, [%xs+56]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_14, [%ws+1792]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %xi_15, [%xs+60]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_15, [%ws+1920]: 4 sectors for 128 bytes, all used
+//   st.global.f32 [%at], %acc: 4 sectors for 128 bytes, all used
+//   x: each byte is read at most once by every thread of a block
+//   w: each byte is read at most 16 times by every block
 .visible .entry _ZN7kernite8microgpt3gpu7kernels2lmE(
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels2lmE_param_0,
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels2lmE_param_1,
@@ -720,6 +1042,7 @@
 	ret;
 }
 
+// kernite does not follow a kernel that jumps yet: what its memory moves is not counted
 .visible .entry _ZN7kernite8microgpt3gpu7kernels9attentionE(
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels9attentionE_param_0,
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels9attentionE_param_1,
@@ -851,6 +1174,67 @@ $L2:
 	ret;
 }
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.f32 %p0, [%ls]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %p1, [%ls+4]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %p2, [%ls+8]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %p3, [%ls+12]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %p4, [%ls+16]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %p5, [%ls+20]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %p6, [%ls+24]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %p7, [%ls+28]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %p8, [%ls+32]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %p9, [%ls+36]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %p10, [%ls+40]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %p11, [%ls+44]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %p12, [%ls+48]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %p13, [%ls+52]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %p14, [%ls+56]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %p15, [%ls+60]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %p16, [%ls+64]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %p17, [%ls+68]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %p18, [%ls+72]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %p19, [%ls+76]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %p20, [%ls+80]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %p21, [%ls+84]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %p22, [%ls+88]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %p23, [%ls+92]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %p24, [%ls+96]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %p25, [%ls+100]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %p26, [%ls+104]: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps], %p0: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+4], %p1: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+8], %p2: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+12], %p3: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+16], %p4: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+20], %p5: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+24], %p6: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+28], %p7: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+32], %p8: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+36], %p9: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+40], %p10: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+44], %p11: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+48], %p12: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+52], %p13: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+56], %p14: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+60], %p15: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+64], %p16: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+68], %p17: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+72], %p18: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+76], %p19: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+80], %p20: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+84], %p21: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+88], %p22: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+92], %p23: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+96], %p24: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+100], %p25: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+104], %p26: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+108], %z: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+112], %z: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+116], %z: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+120], %z: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%ps+124], %z: 32 sectors for 128 bytes, an eighth used
+//   logits: each byte is read at most once by every block
 .visible .entry _ZN7kernite8microgpt3gpu7kernels7softmaxE(
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels7softmaxE_param_0,
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels7softmaxE_param_1,
@@ -1644,6 +2028,12 @@ $L2:
 	ret;
 }
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.u32 %target, [%at]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %p, [%at_1]: 4 sectors for 128 bytes, all used
+//   st.global.f32 [%at_2], %p: 4 sectors for 128 bytes, all used
+//   probs: not told how many times a byte is read, as its blocks may read the same bytes
+//   targets: each byte is read at most once by every thread of a block
 .visible .entry _ZN7kernite8microgpt3gpu7kernels4xentE(
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels4xentE_param_0,
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels4xentE_param_1,
@@ -1679,6 +2069,108 @@ $L2:
 	ret;
 }
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.f32 %acc, [%at_1]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %g, [%dys]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi, [%ws]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_1, [%dys+4]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_1, [%ws+4]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_2, [%dys+8]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_2, [%ws+8]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_3, [%dys+12]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_3, [%ws+12]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_4, [%dys+16]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_4, [%ws+16]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_5, [%dys+20]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_5, [%ws+20]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_6, [%dys+24]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_6, [%ws+24]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_7, [%dys+28]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_7, [%ws+28]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_8, [%dys+32]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_8, [%ws+32]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_9, [%dys+36]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_9, [%ws+36]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_10, [%dys+40]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_10, [%ws+40]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_11, [%dys+44]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_11, [%ws+44]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_12, [%dys+48]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_12, [%ws+48]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_13, [%dys+52]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_13, [%ws+52]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_14, [%dys+56]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_14, [%ws+56]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_15, [%dys+60]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_15, [%ws+60]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_16, [%dys+64]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_16, [%ws+64]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_17, [%dys+68]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_17, [%ws+68]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_18, [%dys+72]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_18, [%ws+72]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_19, [%dys+76]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_19, [%ws+76]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_20, [%dys+80]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_20, [%ws+80]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_21, [%dys+84]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_21, [%ws+84]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_22, [%dys+88]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_22, [%ws+88]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_23, [%dys+92]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_23, [%ws+92]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_24, [%dys+96]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_24, [%ws+96]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_25, [%dys+100]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_25, [%ws+100]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_26, [%dys+104]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_26, [%ws+104]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_27, [%dys+108]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_27, [%ws+108]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_28, [%dys+112]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_28, [%ws+112]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_29, [%dys+116]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_29, [%ws+116]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_30, [%dys+120]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_30, [%ws+120]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_31, [%dys+124]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_31, [%ws+124]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_32, [%dys+128]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_32, [%ws+128]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_33, [%dys+132]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_33, [%ws+132]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_34, [%dys+136]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_34, [%ws+136]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_35, [%dys+140]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_35, [%ws+140]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_36, [%dys+144]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_36, [%ws+144]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_37, [%dys+148]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_37, [%ws+148]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_38, [%dys+152]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_38, [%ws+152]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_39, [%dys+156]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_39, [%ws+156]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_40, [%dys+160]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_40, [%ws+160]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_41, [%dys+164]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_41, [%ws+164]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_42, [%dys+168]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_42, [%ws+168]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_43, [%dys+172]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_43, [%ws+172]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_44, [%dys+176]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_44, [%ws+176]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_45, [%dys+180]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_45, [%ws+180]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_46, [%dys+184]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_46, [%ws+184]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_47, [%dys+188]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_47, [%ws+188]: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%at_2], %acc: 4 sectors for 128 bytes, all used
+//   dx: not told how many times a byte is read, as its blocks may read the same bytes
+//   dy: each byte is read at most once by every thread of a block
+//   w: each byte is read at most once by every block
 .visible .entry _ZN7kernite8microgpt3gpu7kernels9qkv_bwd_xE(
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels9qkv_bwd_xE_param_0,
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels9qkv_bwd_xE_param_1,
@@ -1863,6 +2355,44 @@ $L2:
 	ret;
 }
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.f32 %acc, [%at_1]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %g, [%dys]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi, [%ws]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_1, [%dys+4]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_1, [%ws+4]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_2, [%dys+8]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_2, [%ws+8]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_3, [%dys+12]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_3, [%ws+12]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_4, [%dys+16]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_4, [%ws+16]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_5, [%dys+20]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_5, [%ws+20]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_6, [%dys+24]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_6, [%ws+24]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_7, [%dys+28]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_7, [%ws+28]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_8, [%dys+32]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_8, [%ws+32]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_9, [%dys+36]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_9, [%ws+36]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_10, [%dys+40]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_10, [%ws+40]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_11, [%dys+44]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_11, [%ws+44]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_12, [%dys+48]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_12, [%ws+48]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_13, [%dys+52]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_13, [%ws+52]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_14, [%dys+56]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_14, [%ws+56]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_15, [%dys+60]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_15, [%ws+60]: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%at_2], %acc: 4 sectors for 128 bytes, all used
+//   dx: not told how many times a byte is read, as its blocks may read the same bytes
+//   dy: each byte is read at most once by every thread of a block
+//   w: each byte is read at most once by every block
 .visible .entry _ZN7kernite8microgpt3gpu7kernels8wo_bwd_xE(
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels8wo_bwd_xE_param_0,
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels8wo_bwd_xE_param_1,
@@ -1943,6 +2473,140 @@ $L2:
 	ret;
 }
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.f32 %acc, [%at_1]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %g, [%dys]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi, [%ws]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_1, [%dys+4]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_1, [%ws+4]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_2, [%dys+8]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_2, [%ws+8]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_3, [%dys+12]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_3, [%ws+12]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_4, [%dys+16]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_4, [%ws+16]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_5, [%dys+20]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_5, [%ws+20]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_6, [%dys+24]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_6, [%ws+24]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_7, [%dys+28]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_7, [%ws+28]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_8, [%dys+32]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_8, [%ws+32]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_9, [%dys+36]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_9, [%ws+36]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_10, [%dys+40]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_10, [%ws+40]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_11, [%dys+44]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_11, [%ws+44]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_12, [%dys+48]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_12, [%ws+48]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_13, [%dys+52]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_13, [%ws+52]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_14, [%dys+56]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_14, [%ws+56]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_15, [%dys+60]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_15, [%ws+60]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_16, [%dys+64]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_16, [%ws+64]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_17, [%dys+68]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_17, [%ws+68]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_18, [%dys+72]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_18, [%ws+72]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_19, [%dys+76]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_19, [%ws+76]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_20, [%dys+80]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_20, [%ws+80]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_21, [%dys+84]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_21, [%ws+84]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_22, [%dys+88]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_22, [%ws+88]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_23, [%dys+92]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_23, [%ws+92]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_24, [%dys+96]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_24, [%ws+96]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_25, [%dys+100]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_25, [%ws+100]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_26, [%dys+104]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_26, [%ws+104]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_27, [%dys+108]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_27, [%ws+108]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_28, [%dys+112]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_28, [%ws+112]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_29, [%dys+116]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_29, [%ws+116]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_30, [%dys+120]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_30, [%ws+120]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_31, [%dys+124]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_31, [%ws+124]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_32, [%dys+128]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_32, [%ws+128]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_33, [%dys+132]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_33, [%ws+132]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_34, [%dys+136]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_34, [%ws+136]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_35, [%dys+140]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_35, [%ws+140]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_36, [%dys+144]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_36, [%ws+144]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_37, [%dys+148]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_37, [%ws+148]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_38, [%dys+152]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_38, [%ws+152]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_39, [%dys+156]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_39, [%ws+156]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_40, [%dys+160]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_40, [%ws+160]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_41, [%dys+164]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_41, [%ws+164]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_42, [%dys+168]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_42, [%ws+168]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_43, [%dys+172]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_43, [%ws+172]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_44, [%dys+176]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_44, [%ws+176]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_45, [%dys+180]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_45, [%ws+180]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_46, [%dys+184]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_46, [%ws+184]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_47, [%dys+188]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_47, [%ws+188]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_48, [%dys+192]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_48, [%ws+192]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_49, [%dys+196]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_49, [%ws+196]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_50, [%dys+200]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_50, [%ws+200]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_51, [%dys+204]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_51, [%ws+204]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_52, [%dys+208]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_52, [%ws+208]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_53, [%dys+212]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_53, [%ws+212]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_54, [%dys+216]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_54, [%ws+216]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_55, [%dys+220]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_55, [%ws+220]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_56, [%dys+224]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_56, [%ws+224]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_57, [%dys+228]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_57, [%ws+228]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_58, [%dys+232]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_58, [%ws+232]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_59, [%dys+236]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_59, [%ws+236]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_60, [%dys+240]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_60, [%ws+240]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_61, [%dys+244]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_61, [%ws+244]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_62, [%dys+248]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_62, [%ws+248]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_63, [%dys+252]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_63, [%ws+252]: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%at_2], %acc: 4 sectors for 128 bytes, all used
+//   dx: not told how many times a byte is read, as its blocks may read the same bytes
+//   dy: each byte is read at most once by every thread of a block
+//   w: each byte is read at most once by every block
 .visible .entry _ZN7kernite8microgpt3gpu7kernels9fc1_bwd_xE(
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels9fc1_bwd_xE_param_0,
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels9fc1_bwd_xE_param_1,
@@ -2179,6 +2843,44 @@ $L2:
 	ret;
 }
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.f32 %acc, [%at_1]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %g, [%dys]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi, [%ws]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_1, [%dys+4]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_1, [%ws+4]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_2, [%dys+8]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_2, [%ws+8]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_3, [%dys+12]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_3, [%ws+12]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_4, [%dys+16]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_4, [%ws+16]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_5, [%dys+20]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_5, [%ws+20]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_6, [%dys+24]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_6, [%ws+24]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_7, [%dys+28]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_7, [%ws+28]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_8, [%dys+32]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_8, [%ws+32]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_9, [%dys+36]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_9, [%ws+36]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_10, [%dys+40]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_10, [%ws+40]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_11, [%dys+44]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_11, [%ws+44]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_12, [%dys+48]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_12, [%ws+48]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_13, [%dys+52]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_13, [%ws+52]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_14, [%dys+56]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_14, [%ws+56]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_15, [%dys+60]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_15, [%ws+60]: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%at_2], %acc: 4 sectors for 128 bytes, all used
+//   dx: not told how many times a byte is read, as its blocks may read the same bytes
+//   dy: each byte is read at most once by every thread of a block
+//   w: each byte is read at most once by every block
 .visible .entry _ZN7kernite8microgpt3gpu7kernels9fc2_bwd_xE(
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels9fc2_bwd_xE_param_0,
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels9fc2_bwd_xE_param_1,
@@ -2259,6 +2961,76 @@ $L2:
 	ret;
 }
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.f32 %acc, [%at_1]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %g, [%dys]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi, [%ws]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_1, [%dys+4]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_1, [%ws+4]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_2, [%dys+8]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_2, [%ws+8]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_3, [%dys+12]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_3, [%ws+12]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_4, [%dys+16]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_4, [%ws+16]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_5, [%dys+20]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_5, [%ws+20]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_6, [%dys+24]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_6, [%ws+24]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_7, [%dys+28]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_7, [%ws+28]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_8, [%dys+32]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_8, [%ws+32]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_9, [%dys+36]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_9, [%ws+36]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_10, [%dys+40]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_10, [%ws+40]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_11, [%dys+44]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_11, [%ws+44]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_12, [%dys+48]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_12, [%ws+48]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_13, [%dys+52]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_13, [%ws+52]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_14, [%dys+56]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_14, [%ws+56]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_15, [%dys+60]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_15, [%ws+60]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_16, [%dys+64]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_16, [%ws+64]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_17, [%dys+68]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_17, [%ws+68]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_18, [%dys+72]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_18, [%ws+72]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_19, [%dys+76]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_19, [%ws+76]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_20, [%dys+80]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_20, [%ws+80]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_21, [%dys+84]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_21, [%ws+84]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_22, [%dys+88]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_22, [%ws+88]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_23, [%dys+92]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_23, [%ws+92]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_24, [%dys+96]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_24, [%ws+96]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_25, [%dys+100]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_25, [%ws+100]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_26, [%dys+104]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_26, [%ws+104]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_27, [%dys+108]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_27, [%ws+108]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_28, [%dys+112]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_28, [%ws+112]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_29, [%dys+116]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_29, [%ws+116]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_30, [%dys+120]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_30, [%ws+120]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g_31, [%dys+124]: 1 sector for 4 bytes, an eighth used
+//   ld.global.f32 %wi_31, [%ws+124]: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%at_2], %acc: 4 sectors for 128 bytes, all used
+//   dx: not told how many times a byte is read, as its blocks may read the same bytes
+//   dy: each byte is read at most once by every thread of a block
+//   w: each byte is read at most once by every block
 .visible .entry _ZN7kernite8microgpt3gpu7kernels8lm_bwd_xE(
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels8lm_bwd_xE_param_0,
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels8lm_bwd_xE_param_1,
@@ -2391,6 +3163,7 @@ $L2:
 	ret;
 }
 
+// kernite does not follow a kernel that jumps yet: what its memory moves is not counted
 .visible .entry _ZN7kernite8microgpt3gpu7kernels9qkv_bwd_wE(
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels9qkv_bwd_wE_param_0,
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels9qkv_bwd_wE_param_1,
@@ -2435,6 +3208,7 @@ $L1:
 	ret;
 }
 
+// kernite does not follow a kernel that jumps yet: what its memory moves is not counted
 .visible .entry _ZN7kernite8microgpt3gpu7kernels8wo_bwd_wE(
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels8wo_bwd_wE_param_0,
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels8wo_bwd_wE_param_1,
@@ -2479,6 +3253,7 @@ $L1:
 	ret;
 }
 
+// kernite does not follow a kernel that jumps yet: what its memory moves is not counted
 .visible .entry _ZN7kernite8microgpt3gpu7kernels9fc1_bwd_wE(
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels9fc1_bwd_wE_param_0,
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels9fc1_bwd_wE_param_1,
@@ -2523,6 +3298,7 @@ $L1:
 	ret;
 }
 
+// kernite does not follow a kernel that jumps yet: what its memory moves is not counted
 .visible .entry _ZN7kernite8microgpt3gpu7kernels9fc2_bwd_wE(
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels9fc2_bwd_wE_param_0,
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels9fc2_bwd_wE_param_1,
@@ -2567,6 +3343,7 @@ $L1:
 	ret;
 }
 
+// kernite does not follow a kernel that jumps yet: what its memory moves is not counted
 .visible .entry _ZN7kernite8microgpt3gpu7kernels8lm_bwd_wE(
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels8lm_bwd_wE_param_0,
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels8lm_bwd_wE_param_1,
@@ -2611,6 +3388,10 @@ $L1:
 	ret;
 }
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.f32 %x, [%at]: 4 sectors for 128 bytes, all used
+//   @!%above st.global.f32 [%at_1], %z: 4 sectors for 128 bytes, all used
+//   h: not told how many times a byte is read, as its blocks may read the same bytes
 .visible .entry _ZN7kernite8microgpt3gpu7kernels8relu_bwdE(
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels8relu_bwdE_param_0,
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels8relu_bwdE_param_1
@@ -2637,6 +3418,76 @@ $L1:
 	ret;
 }
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.f32 %g0, [%dys]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %xe0, [%xs]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g1, [%dys+4]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %xe1, [%xs+4]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g2, [%dys+8]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %xe2, [%xs+8]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g3, [%dys+12]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %xe3, [%xs+12]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g4, [%dys+16]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %xe4, [%xs+16]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g5, [%dys+20]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %xe5, [%xs+20]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g6, [%dys+24]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %xe6, [%xs+24]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g7, [%dys+28]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %xe7, [%xs+28]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g8, [%dys+32]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %xe8, [%xs+32]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g9, [%dys+36]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %xe9, [%xs+36]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g10, [%dys+40]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %xe10, [%xs+40]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g11, [%dys+44]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %xe11, [%xs+44]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g12, [%dys+48]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %xe12, [%xs+48]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g13, [%dys+52]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %xe13, [%xs+52]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g14, [%dys+56]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %xe14, [%xs+56]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %g15, [%dys+60]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %xe15, [%xs+60]: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %s, [%at]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %d, [%dxs]: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%dxs], %d: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %d_1, [%dxs+4]: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%dxs+4], %d_1: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %d_2, [%dxs+8]: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%dxs+8], %d_2: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %d_3, [%dxs+12]: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%dxs+12], %d_3: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %d_4, [%dxs+16]: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%dxs+16], %d_4: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %d_5, [%dxs+20]: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%dxs+20], %d_5: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %d_6, [%dxs+24]: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%dxs+24], %d_6: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %d_7, [%dxs+28]: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%dxs+28], %d_7: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %d_8, [%dxs+32]: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%dxs+32], %d_8: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %d_9, [%dxs+36]: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%dxs+36], %d_9: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %d_10, [%dxs+40]: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%dxs+40], %d_10: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %d_11, [%dxs+44]: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%dxs+44], %d_11: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %d_12, [%dxs+48]: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%dxs+48], %d_12: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %d_13, [%dxs+52]: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%dxs+52], %d_13: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %d_14, [%dxs+56]: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%dxs+56], %d_14: 32 sectors for 128 bytes, an eighth used
+//   ld.global.f32 %d_15, [%dxs+60]: 32 sectors for 128 bytes, an eighth used
+//   st.global.f32 [%dxs+60], %d_15: 32 sectors for 128 bytes, an eighth used
+//   dx: each byte is read at most once by every block
+//   dy: each byte is read at most once by every block
+//   x: each byte is read at most once by every block
+//   r: each byte is read at most once by every block
 .visible .entry _ZN7kernite8microgpt3gpu7kernels11rmsnorm_bwdE(
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels11rmsnorm_bwdE_param_0,
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels11rmsnorm_bwdE_param_1,
@@ -2807,6 +3658,7 @@ $L1:
 	ret;
 }
 
+// kernite does not follow a kernel that jumps yet: what its memory moves is not counted
 .visible .entry _ZN7kernite8microgpt3gpu7kernels13attention_bwdE(
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels13attention_bwdE_param_0,
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels13attention_bwdE_param_1,
@@ -2958,6 +3810,7 @@ $L2:
 	ret;
 }
 
+// kernite does not follow a kernel that jumps yet: what its memory moves is not counted
 .visible .entry _ZN7kernite8microgpt3gpu7kernels9embed_bwdE(
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels9embed_bwdE_param_0,
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels9embed_bwdE_param_1,
@@ -3007,6 +3860,19 @@ $L0:
 	ret;
 }
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.f32 %gi, [%at]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %mi, [%at_1]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %vi, [%at_2]: 4 sectors for 128 bytes, all used
+//   st.global.f32 [%at_3], %mi: 4 sectors for 128 bytes, all used
+//   st.global.f32 [%at_4], %vi: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %pi, [%at_5]: 4 sectors for 128 bytes, all used
+//   st.global.f32 [%at_6], %pi: 4 sectors for 128 bytes, all used
+//   st.global.f32 [%at_7], %x: 4 sectors for 128 bytes, all used
+//   p: each byte is read at most once
+//   g: each byte is read at most once
+//   m: each byte is read at most once
+//   v: each byte is read at most once
 .visible .entry _ZN7kernite8microgpt3gpu7kernels4adamE(
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels4adamE_param_0,
 	.param .u64 _ZN7kernite8microgpt3gpu7kernels4adamE_param_1,

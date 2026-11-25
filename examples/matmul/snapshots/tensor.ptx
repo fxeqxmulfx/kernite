@@ -6,6 +6,7 @@
 
 .extern .shared .align 128 .b8 _ZZN7kernite6matmul6tensor7kernels5hgemmEE4smem[];
 
+// kernite does not follow a kernel that jumps yet: what its memory moves is not counted
 .visible .entry _ZN7kernite6matmul6tensor7kernels5hgemmE(
 	.param .u64 _ZN7kernite6matmul6tensor7kernels5hgemmE_param_0,
 	.param .u64 _ZN7kernite6matmul6tensor7kernels5hgemmE_param_1,

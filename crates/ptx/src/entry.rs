@@ -64,6 +64,9 @@ pub struct Entry {
     /// For a kernel with no `unsafe`, what each launch must hold for it to be safe, which the host checks; none
     /// for an `unsafe` kernel or a function.
     pub requires: Vec<Requirement>,
+    /// For a kernel, what its memory moves, a line for the listing to say before it, each of which is a comment; none
+    /// for a kernel that moves no global memory, or a function.
+    pub report: Vec<String>,
 }
 
 impl Entry {
@@ -104,7 +107,8 @@ impl Entry {
     /// its parameters and of the addresses of memory outside the module into them, and its body.
     pub fn text(&self) -> String {
         let name = &self.program.name;
-        let mut out = self.head() + "\n";
+        let mut out: String = self.report.iter().map(|line| format!("// {line}\n")).collect();
+        out += &(self.head() + "\n");
         for directive in &self.directives {
             out += &format!("{directive}\n");
         }

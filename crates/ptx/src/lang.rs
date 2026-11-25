@@ -75,8 +75,10 @@ use crate::call::{NO_PRED, Prototype, Returns, fits_param, formal};
 use crate::entry::{Entry, Op, Param};
 use crate::forms::{self, Bound, Check, Count, Imm, Part, Role, Space, Spec, TyRef};
 use crate::needs::Needs;
-use crate::safety::{self, Proof, Step};
+use crate::numbers::{Numbers, Step};
+use crate::safety::{self, Proof};
 use crate::statics::{Memory, Static, shape};
+use crate::traffic::Traffic;
 use crate::ty::{Kind, Ty};
 use crate::var::Var;
 
@@ -136,6 +138,10 @@ pub struct Kernel {
     /// Each instruction of a kernel, by its place in the body, where a thread may end or never
     /// come back while others go on: a guarded `ret`, `exit` or `trap`, or a call.
     pub(crate) leaves: Vec<usize>,
+    /// What the kernel's numbers are, as its instructions come.
+    numbers: Numbers,
+    /// What the kernel's loads and stores of global memory move, as its instructions come.
+    traffic: Traffic,
     /// For a kernel with no `unsafe`, what proves it safe as its instructions come.
     proof: Option<Proof>,
 }
@@ -205,6 +211,15 @@ enum Miss {
     At(usize, bool, Fault),
 }
 
+/// The variables `args` write, by their places among the kernel's.
+fn written(args: &[Arg<VReg>]) -> Vec<u32> {
+    let writes = |a: &Arg<VReg>| match (a.operand, a.access) {
+        (Operand::Reg(r, _), Access::Write | Access::ReadWrite) => Some(r.id),
+        _ => None,
+    };
+    args.iter().filter_map(writes).collect()
+}
+
 impl Kernel {
     /// An empty kernel called `name` in messages, and `symbol` in PTX: what
     /// [`symbol`](crate::symbol) writes for it.
@@ -247,6 +262,8 @@ impl Kernel {
             at: Span::default(),
             masks: vec![],
             leaves: vec![],
+            numbers: Numbers::new(),
+            traffic: Traffic::default(),
             proof: None,
         }
     }
@@ -286,11 +303,13 @@ impl Kernel {
     /// Makes the kernel one with no `unsafe`, which kernite proves safe as its instructions come: an instruction that
     /// it cannot follow is an error, and what each launch must hold is in the [`Entry`].
     pub fn safe(&mut self) {
-        self.proof = Some(Proof::new());
+        self.proof = Some(Proof::default());
     }
 
     /// The kernel as written.
     pub fn finish(self) -> Entry {
+        // What a kernel's memory moves is said of the kernels, not of the functions they call.
+        let report = if self.func.is_none() { self.traffic.report(&self.numbers) } else { vec![] };
         // The module's memory the module declares.
         let memory = self.memory.into_iter().filter(|m| matches!(m.space, Space::Shared | Space::Local)).collect();
         Entry {
@@ -304,7 +323,8 @@ impl Kernel {
             func: self.func,
             calls: self.calls,
             directives: self.directives,
-            requires: self.proof.map(Proof::requires).unwrap_or_default(),
+            requires: self.proof.map(|_| self.numbers.requires()).unwrap_or_default(),
+            report,
         }
     }
 
@@ -415,36 +435,21 @@ impl Kernel {
         }
     }
 
-    /// What the proof of a kernel with no `unsafe`, if it is one, makes of the instruction `name`, which `b` is of,
-    /// over `args`, under `guard`, and `w` is the operands of: an error where it cannot prove it safe. A kernel that
-    /// names memory it declares, or the module's, is not proved: it is an `unsafe fn`.
-    fn prove(
-        &mut self,
-        name: &str,
-        b: &Bound,
-        args: &[Given<Var>],
-        guard: Option<(VReg, bool)>,
-        w: &Written,
-    ) -> Result<(), Fault> {
+    /// What the proof of a kernel with no `unsafe`, if it is one, makes of the instruction `i`: an error where it
+    /// cannot prove it safe. A kernel that names memory it declares, or the module's, is not proved: it is an
+    /// `unsafe fn`.
+    fn prove(&mut self, i: &Step) -> Result<(), Fault> {
         let Some(proof) = &mut self.proof else { return Ok(()) };
-        if let Some((at, i)) = args.iter().enumerate().find_map(|(at, a)| Some((at, safety::memory(a)?))) {
-            let v = self.declared.get(i).map_or("", |d| d.0.as_str());
-            let what = match self.memory.get(i).map(|m| m.space) {
+        if let Some((at, m)) = i.args.iter().enumerate().find_map(|(at, a)| Some((at, safety::memory(a)?))) {
+            let v = self.declared.get(m).map_or("", |d| d.0.as_str());
+            let what = match self.memory.get(m).map(|m| m.space) {
                 Some(Space::Shared) => "shared memory, which the threads of a block reach together",
                 Some(Space::Local) => "local memory, which kernite does not follow",
                 _ => "memory of the module's, which every kernel and the host reach",
             };
             return Err(Fault::at(at, format!("`{v}` is {what}, so a kernel that names it is an `unsafe fn`")));
         }
-        let written = w
-            .args
-            .iter()
-            .filter_map(|a| match (a.operand, a.access) {
-                (Operand::Reg(r, _), Access::Write | Access::ReadWrite) => Some(r.id),
-                _ => None,
-            })
-            .collect();
-        proof.inst(&Step { name, bound: b, args, guard, written, reach: w.reach })
+        proof.inst(&mut self.numbers, i)
     }
 
     /// Adds the instruction, under the predicate `guard` if there is one, held or not; keeping
@@ -1183,6 +1188,7 @@ impl Kernel {
                 }
             }
         };
+        let listed = line.len();
         line += &self.guarded(guard);
         // What it returns, the function, its arguments, and the table it is one of.
         line += name;
@@ -1201,6 +1207,8 @@ impl Kernel {
         if flow == Flow::Next {
             self.may_leave();
         }
+        self.traffic.call(&self.numbers, &passed, line.get(listed..).unwrap_or_default());
+        self.numbers.lose(&written(&reads), "what a function returns", None);
         self.push(line, reads, guard, flow);
         Ok(())
     }
@@ -1462,7 +1470,7 @@ impl Kernel {
 /// particular.
 fn reach(b: &Bound, args: &[Given<Var>]) -> u64 {
     match b.form.op {
-        "ld" | "st" | "atom" | "red" | "wmma" => {
+        "ld" | "ldu" | "st" | "atom" | "red" | "wmma" => {
             b.form.data().and_then(|s| Some(b.scalar()? * b.count(s) as u64)).unwrap_or(1)
         }
         "mbarrier" => 8,
@@ -1828,9 +1836,7 @@ impl Target for Kernel {
         self.p.params.push((reg, PReg { class: reg.class, hw: 0 }));
         self.p.signature.params.push(reg.class);
         self.named.insert(format!("{}_param_{}", self.p.name, self.params.len()));
-        if let Some(proof) = &mut self.proof {
-            proof.param(reg, self.params.len(), ty, t);
-        }
+        self.numbers.param(name, reg, self.params.len(), ty, t);
         self.params.push(Param { ty: t, reg: self.reg(reg).to_string(), pointer });
         Ok(Var::Reg { reg, ty: t })
     }
@@ -2013,7 +2019,8 @@ impl Target for Kernel {
                 None => Fault::new(format!("`{name}` takes {}, not {}", counts(&ranges), args.len())),
             });
         };
-        self.prove(name, b, args, guard, &w)?;
+        let step = Step { name, bound: b, args, guard, written: written(&w.args), reach: w.reach };
+        self.prove(&step)?;
         self.needs = self.needs.and(b.needs).and(w.needs);
         for f in &w.funcs {
             self.named_fn(f);
@@ -2054,6 +2061,8 @@ impl Target for Kernel {
         if guard.is_some() && matches!(b.form.op, "ret" | "exit" | "trap") {
             self.may_leave();
         }
+        self.traffic.step(&self.numbers, &step, &line);
+        self.numbers.follow(&step);
         self.push(line, w.args, guard, flow);
         Ok(())
     }

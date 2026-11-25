@@ -9,6 +9,12 @@
 
 .extern .shared .align 4 .b8 _ZZN7kernite6my_app3gpu12reverse_runsEE3run[];
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.f32 %xi, [%at_x]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %yi, [%at_y]: 4 sectors for 128 bytes, all used
+//   st.global.f32 [%at_y], %yi: 4 sectors for 128 bytes, all used
+//   x: each byte is read at most once
+//   y: each byte is read at most once
 .visible .entry _ZN7kernite6my_app3gpu5saxpyE(
 	.param .f32 _ZN7kernite6my_app3gpu5saxpyE_param_0,
 	.param .u64 _ZN7kernite6my_app3gpu5saxpyE_param_1,
@@ -42,6 +48,10 @@
 	ret;
 }
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.f32 %v, [%at]: 4 sectors for 128 bytes, all used
+//   @%lower st.global.f32 [%at], %v: not counted, as its address comes from an instruction under a guard
+//   x: not told how many times a byte is read, as its blocks may read the same bytes
 .visible .entry _ZN7kernite6my_app3gpu10block_sumsILj256EEE(
 	.param .u64 _ZN7kernite6my_app3gpu10block_sumsILj256EEE_param_0,
 	.param .u64 _ZN7kernite6my_app3gpu10block_sumsILj256EEE_param_1
@@ -111,6 +121,10 @@
 	ret;
 }
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.f32 %v, [%at]: 4 sectors for 128 bytes, all used
+//   @%lower st.global.f32 [%at], %v: not counted, as its address comes from an instruction under a guard
+//   x: not told how many times a byte is read, as its blocks may read the same bytes
 .visible .entry _ZN7kernite6my_app3gpu10block_sumsILj1024EEE(
 	.param .u64 _ZN7kernite6my_app3gpu10block_sumsILj1024EEE_param_0,
 	.param .u64 _ZN7kernite6my_app3gpu10block_sumsILj1024EEE_param_1
@@ -190,6 +204,10 @@
 	ret;
 }
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.f32 %v, [%at]: 4 sectors for 128 bytes, all used
+//   st.global.f32 [%at], %v: 4 sectors for 128 bytes, all used
+//   x: each byte is read at most once
 .visible .entry _ZN7kernite6my_app3gpu12reverse_runsE(
 	.param .u64 _ZN7kernite6my_app3gpu12reverse_runsE_param_0
 )
@@ -220,6 +238,10 @@
 	ret;
 }
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.b16 %v, [%at]: 2 sectors for 64 bytes, all used
+//   st.global.b16 [%at], %v: 2 sectors for 64 bytes, all used
+//   x: each byte is read at most once
 .visible .entry _ZN7kernite6my_app3gpu9scale_f16E(
 	.param .u64 _ZN7kernite6my_app3gpu9scale_f16E_param_0,
 	.param .b16 _ZN7kernite6my_app3gpu9scale_f16E_param_1,
@@ -253,6 +275,12 @@
 	.param .u32 _ZN7kernite6my_app3gpu3gcdE_param_1
 );
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.u32 %x, [%at_a]: 4 sectors for 128 bytes, all used
+//   ld.global.u32 %y, [%at_b]: 4 sectors for 128 bytes, all used
+//   st.global.u32 [%at_g], %d: 4 sectors for 128 bytes, all used
+//   a: each byte is read at most once
+//   b: each byte is read at most once
 .visible .entry _ZN7kernite6my_app3gpu4gcdsE(
 	.param .u64 _ZN7kernite6my_app3gpu4gcdsE_param_0,
 	.param .u64 _ZN7kernite6my_app3gpu4gcdsE_param_1,
@@ -306,6 +334,10 @@
 	ret;
 }
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.u32 %bin, [%at]: 4 sectors for 128 bytes, all used
+//   red.global.add.u32 [%at], 1: not counted, as its address comes from a value loaded from memory
+//   x: each byte is read at most once
 .visible .entry _ZN7kernite6my_app3gpu9histogramE(
 	.param .u64 _ZN7kernite6my_app3gpu9histogramE_param_0,
 	.param .u32 _ZN7kernite6my_app3gpu9histogramE_param_1
@@ -333,6 +365,10 @@
 	ret;
 }
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.f32 %v, [%at]: 4 sectors for 128 bytes, all used
+//   st.global.f32 [%at], %v: 4 sectors for 128 bytes, all used
+//   x: each byte is read at most once
 .visible .entry _ZN7kernite6my_app3gpu5weighE(
 	.param .u64 _ZN7kernite6my_app3gpu5weighE_param_0,
 	.param .u32 _ZN7kernite6my_app3gpu5weighE_param_1

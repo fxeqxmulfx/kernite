@@ -106,7 +106,8 @@ the list of crates in the repository's `README.md`. `architecture.rs` fails with
   run on the real targets, through `kernite::x86_str` and `kernite::ptx_str`, in `crates/kernite/tests/`;
   kernite-lang may not depend on a target, even for its tests.
 - A test kernel really compiles: each variable written before it is read, each operand one the machine takes.
-- Tests that need `ptxas` (`$PTXAS`, the path, or `/usr/local/*/bin`), `llvm-mc` (`$LLVM_MC`), GNU `as`
+- Tests that need `ptxas` (`$PTXAS`, the path, or `/usr/local/*/bin`), Nsight Compute's `ncu` (`$NCU`, the path, or
+  `/usr/local/*/bin`, and the driver's leave to read the GPU's counters), `llvm-mc` (`$LLVM_MC`), GNU `as`
   (`$GNU_AS`), `strace` (`$STRACE`), rust-analyzer (`$RUST_ANALYZER`, or the stable toolchain's, which the hover
   tests of kernite-macros ask what an editor shows) or a GPU skip where it is missing, and say so. This machine has
   them all: CUDA 13.5 and an RTX 3050, `sm_86`, with 4 GB.

@@ -543,7 +543,7 @@ fn the_ptx_of_a_kernel_of_much_code_is_built_where_it_is_made_and_in_each_crate_
     Ok(())
 }
 
-/// A module whose PTX has the name of its static 100000 times has 100000 holes in a part of 6 MB, more than one
+/// A module whose PTX has the name of its static 100000 times has 100000 holes in a part of 5 MB, more than one
 /// constant of Rust's takes steps for: the macros cut it in parts of a few thousand pieces, and the second crate holds
 /// that each use of the static has its name, whole, where a part is cut as well as where it is not, and that no hole is
 /// left.

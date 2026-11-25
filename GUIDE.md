@@ -1713,6 +1713,76 @@ launcher takes pointers, `xs.ptr()`, and is `unsafe`. A kernel is an `unsafe fn`
 A crate may `forbid(unsafe_code)` and have safe GPU kernels, and launch them: the Rust the macro writes for a launcher
 is no `unsafe` of the crate's.
 
+## What a GPU kernel's memory moves
+
+Memory serves the threads of a warp in sectors of 32 bytes, each moved whole. A warp whose threads each use 4 bytes of a
+sector of their own moves 8 times the bytes it uses. The listing of a GPU kernel says what its global memory moves, in
+comments before the kernel, so that a change that makes a kernel move more shows in review, as a spill does. It says it
+for each load, store, atomic and copy of global memory, `ld`, `ldu`, `st`, `atom`, `red` and `cp.async`, of every kernel
+that does not jump, `unsafe` or not. A kernel with none has no report, and nor has a function it calls. A call that is
+passed an address of a pointer of the kernel's has a line, `call (%w), peek, (%at): not counted, as kernite does not
+follow a function a kernel calls`, and leaves that pointer not told how many times a byte of it is read, whether the
+function loads from it or gives it back for a load to use. For `saxpy` of
+[`examples/my-app`](examples/my-app/src/main.rs):
+
+```
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.f32 %xi, [%at_x]: 4 sectors for 128 bytes, all used
+//   ld.global.f32 %yi, [%at_y]: 4 sectors for 128 bytes, all used
+//   st.global.f32 [%at_y], %yi: 4 sectors for 128 bytes, all used
+//   x: each byte is read at most once
+//   y: each byte is read at most once
+```
+
+The line of an access says how many sectors the warp reaches, how many bytes its threads use of them, each once though
+two threads reach it, and how much of the sectors that is, in a word where one says it: `all`, `half`, `a quarter`,
+`an eighth`, `a sixteenth`, `a thirty-second`, or a number of one, `11 sixteenths`. A thread that loads the first float
+of 8, `[x + i * 32]`, makes it `32 sectors for 128 bytes, an eighth used`, and a warp that starts 4 bytes past a sector,
+`[x + i * 4 + 4]`, moves 5 sectors where 4 would do. The line of a pointer says how many times at most the launch reads
+a byte of it, `once`, `twice` or `3 times`, and by whom where each thread alone does not: `by every block`, where the
+blocks read the same bytes, `by every thread of a block`, `by every thread`. Not a byte of the code of the kernel
+changes: the report is comments.
+
+A kernel that jumps says `kernite does not follow a kernel that jumps yet: what its memory moves is not counted`, and no
+more. A `ret` under an `if` is no jump.
+
+What the report counts is what kernite takes as given of a launch:
+
+- A warp is 32 threads of consecutive `tid.x`, which run an access together. A block's threads are whole warps. A
+  thread that a guard may stop is counted as if it ran the access, and a copy as if it read all it copies, though its
+  fourth operand may have it read fewer.
+- A warp starts at a multiple of 32 bytes from its pointer where kernite knows no better, and it knows no better of
+  the pointer, of `ntid.x`, or of a number the launch gives, as `n` in `[x + (i + n) * 4]`. It knows the bytes the
+  kernel adds, `+ 4`. A warp whose start moves from one block to the next by bytes that are no multiple of 32,
+  `[x + (ctaid.x + tid.x) * 4]`, is not counted, and says so.
+- Sectors are as NVIDIA's CUDA C++ Best Practices Guide says memory serves a warp, and as Nsight Compute counts them,
+  which PTX's ISA does not say. A test of `examples/my-app` runs kernels of the shapes of access that the listing counts
+  under `ncu`, where `ncu` and a GPU are here, and holds `l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum` and its `_st`,
+  `_atom` and `_red` to what the listing says, times the warps, and the requests, one for an instruction a warp runs, to
+  the instructions. The GPU counts `ldu` and `cp.async` as loads. Stores, atomics and reductions are exact. A load is as
+  many or fewer, by a sector for each warp at most, where the last sector of a warp's load is the first of the next
+  warp's, and the GPU counts it once.
+- Each pointer is to memory of its own, which no other pointer of the launch is to, and which the kernel reaches by no
+  other address: one it loads from memory, or a number. A load at such an address is counted of no pointer, though it
+  may reach the memory of one. A test of `crates/kernite/tests/traffic.rs` holds it, with a pointer, an address loaded
+  from memory and a number, and the line each is told.
+- A number the kernel works out does not wrap: `ctaid.x * ntid.x + tid.x` is less than 2^32, as kernite checks at the
+  launch of a kernel it proves safe. One that wraps on every launch, `i - 1` where `i` may be 0, is not followed. A test
+  of the same file holds it, with `i + n` and `i - 1`.
+
+Where kernite does not follow an access to a pointer and a step of the thread's index, it does not count it, and says
+why in its line, `not counted, as its address comes from a value loaded from memory`. The address is not followed where
+it comes from a load, from what a function returns, from an instruction under a guard, from `tid.y` or from an
+instruction kernite does not work out; where it is a number, or a product of the thread's index and the block's; where
+its step from one thread to the next is a number the launch gives; and where it is a generic address, which may be
+shared or local memory as well as global, or in memory the module declares. The loads and stores of `wmma` are not
+counted yet: its line says ``not counted, as kernite does not count what `wmma.load` moves yet``. A pointer that a
+load is not counted of, or a call is passed, is not told how many times a byte of it is read, and says so, as does one
+whose loads step differently, whose loads start apart by a number the launch gives, or whose blocks may read the same
+bytes. What reaches global memory and has no line: `prefetch`, `prefetchu`, `applypriority` and `discard`, which move
+no value, and `tex`, `tld4`, `suld`, `sust` and `sured`, which reach it by a handle that is no pointer of the kernel's.
+What reaches shared, local or constant memory has no line either.
+
 ## Examples
 
 [`examples/my-app`](examples/my-app/src/main.rs) uses kernite as a crate outside it would: for the CPU `sum8`, a safe

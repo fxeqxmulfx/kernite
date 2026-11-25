@@ -8,15 +8,17 @@ pub mod gpu {
 
     /// Has 8192 pieces of PTX.
     pub unsafe extern "ptx-kernel" fn even() {
+        let at: u64;
         for _ in 0..8190 {
-            red.global.add.u32([COUNTS + 8], 1);
+            mov.u64(at, COUNTS);
         }
     }
 
     /// Has 8193 pieces of PTX.
     pub unsafe extern "ptx-kernel" fn odd() {
+        let at: u64;
         for _ in 0..8191 {
-            red.global.add.u32([COUNTS + 8], 1);
+            mov.u64(at, COUNTS);
         }
     }
 }
@@ -28,7 +30,7 @@ fn each_hole_has_the_names_of_the_path_whichever_the_cut() {
     let hole = "9cut_edges3gpu";
     // The holes: the name of each kernel, each use of the static, and the static's declaration.
     assert_eq!(ptx.matches(hole).count(), (1 + 8190) + (1 + 8191) + 1, "the names of the path in the PTX");
-    assert_eq!(ptx.matches(&format!("[_ZN7project{hole}6COUNTSE+8]")).count(), 8190 + 8191, "the uses of the static");
+    assert_eq!(ptx.matches(&format!(", _ZN7project{hole}6COUNTSE;")).count(), 8190 + 8191, "the uses of the static");
     assert!(ptx.contains(&format!(".entry _ZN7project{hole}4evenE(")), "no kernel `even`");
     assert!(ptx.contains(&format!(".entry _ZN7project{hole}3oddE(")), "no kernel `odd`");
     assert!(!ptx.contains('\0'), "a hole is left in the PTX");
