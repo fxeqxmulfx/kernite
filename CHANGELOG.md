@@ -7,6 +7,8 @@ release gives it its version.
 
 ## Unreleased
 
+## 0.7.0 (2026-11-26)
+
 - kernite-cuda says how many bytes of a GPU's memory are free, and how many it has.
 - kernite-cuda launches on a stream, and runs the work of two streams at once.
 - kernite-cuda page-locks memory the host has, a `Vec`'s say, for kernels to reach until it is dropped.
@@ -40,7 +42,9 @@ release gives it its version.
 - Breaks: a safe GPU kernel reaches each element whole, and kernite refuses `ld.global.u16` through a `*const u32`, as
   the host may store the whole element while the kernel runs; kernite-cuda's `Cuda::concurrent_managed_access` is gone,
   with the clause of an `unsafe` launch's contract it served; kernite-cuda's `Buffer::tail` and `View` are gone, as
-  `xs.part(i..)` does what `tail(i)` did; kernite-x86's `Addr::plus` gives a `Result`, as `times` and `index` do.
+  `xs.part(i..)` does what `tail(i)` did; kernite-x86's `Addr::plus` gives a `Result`, as `times` and `index` do, and
+  its `forms::Kind` has `Acc`, the accumulator `cmpxchg` compares with; kernite-ptx's `Entry` has `report`, the lines
+  that say what a kernel's memory moves.
 
 ## 0.6.0 (2026-11-22)
 
