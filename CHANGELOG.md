@@ -20,6 +20,8 @@ release gives it its version.
 - kernite-cuda's host reaches unified memory while kernels run, with no wait: as atomics, safe, `memory.atomics()`, and
   as a slice, `unsafe { memory.host_now() }`.
 - kernite-cuda lends a part of a buffer or of unified memory, `xs.part(3..10)`, to a kernel or a copy.
+- GUIDE.md names once the driver its facts of a driver hold on: NVIDIA's open kernel module 620.70.06, not 615.71.10.
+- kernite-cuda's `Memory` names a slice registered for good too, and its `lend` and `reach` name only what they refuse.
 - kernite builds the PTX of a module of megabytes, or of many kernels (GitHub issue 1).
 - kernite finds a kernel's `# Safety` by its heading, as rustdoc does, and adds what it writes at the end of it.
 - kernite-cpu's threads wait spinning for as long as their grid says, `Grid::on(&cpus).spin(d)`: a launch of twelve

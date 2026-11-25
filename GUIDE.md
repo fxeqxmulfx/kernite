@@ -996,6 +996,8 @@ ys.read_into(&mut y)?;
 element of `y`, as "A safe GPU kernel", below, says. Its launcher takes the memory, `&xs` to read and `&mut ys` to
 write, and Rust calls it with no `unsafe`.
 
+The driver here is NVIDIA's open kernel module 620.70.06 on Linux 7.0, as `/proc/driver/nvidia/version` says it.
+
 A machine may have several GPUs. The GPUs are those the driver shows the program: all of the machine's, unless
 `CUDA_VISIBLE_DEVICES` chooses which, and the driver numbers them from 0 in its order. `Cuda::count()` says how many
 there are, and `Cuda::on(i)` takes GPU `i`; `Cuda::new()` is `Cuda::on(0)`. `Kernels::load(&cuda)` loads the kernels on
@@ -1088,9 +1090,9 @@ for an event never recorded and `CUDA_ERROR_NOT_READY` for one not done. A `late
 is an error, as a `Duration` is not below zero: ask the one it reached later. The host may have recorded them in the
 other order, for the GPU reaches an event when the work before it on its own stream is done. Events of two GPUs, whose
 clocks are not one clock, are an error too, and the driver is not asked. An event made by `event()` does not time, and
-costs the driver less to record: on the driver here, NVIDIA's open kernel module 620.70.06 on Linux 7.0, 0.6
-microseconds a call against 1.9 microseconds for one that times. It is an `Event`, and one made by `timed_event()` an
-`Event<Timed>`, so `duration_since` is for events that time, and rustc refuses it for one that does not.
+costs the driver less to record: on the driver here, 0.6 microseconds a call against 1.9 microseconds for one that
+times. It is an `Event`, and one made by `timed_event()` an `Event<Timed>`, so `duration_since` is for events that time,
+and rustc refuses it for one that does not.
 
 `duration_since` needs a driver of CUDA 12.8 (570) or later, which brought `cuEventElapsedTime_v2`. `Cuda::new()` opens
 an older driver all the same, and `duration_since` says so when it is called, in the words of the loader: ``dlsym: the
@@ -1194,11 +1196,11 @@ already mapped`. It refuses memory that it made, page-locked or managed: `cuMemH
 (1): invalid argument`. A slice with no elements has no memory to lock, so `register` asks the driver neither to lock it
 nor to unlock it.
 
-The driver here, NVIDIA's open kernel module 615.71.10 on Linux 7.0, faults a kernel on a lent element that has a guard
-page in its aligned 64 KiB, a page set with `madvise(MADV_GUARD_INSTALL)`: the kernel fails with
-`CUDA_ERROR_ILLEGAL_ADDRESS (700)`, as does every call after it. glibc 2.43 sets such a page below each thread's stack.
-So `lend` the memory of a `Vec`, a `Box` or an anonymous mapping, and not an array on a thread's stack. The same kernel
-runs on an element that `register` has page-locked, so `register` takes an array on a thread's stack too.
+The driver here faults a kernel on a lent element that has a guard page in its aligned 64 KiB, a page set with
+`madvise(MADV_GUARD_INSTALL)`: the kernel fails with `CUDA_ERROR_ILLEGAL_ADDRESS (700)`, as does every call after it.
+glibc 2.43 sets such a page below each thread's stack. So `lend` the memory of a `Vec`, a `Box` or an anonymous mapping,
+and not an array on a thread's stack. The same kernel runs on an element that `register` has page-locked, so `register`
+takes an array on a thread's stack too.
 
 A mapping of a file is another matter for `register`. The driver here refuses a shared one on ext4, in the words it
 refuses memory it made in: `cuMemHostRegister: CUDA_ERROR_INVALID_VALUE (1): invalid argument`. It takes a private one,
@@ -1326,18 +1328,18 @@ CUDA_ERROR_INVALID_VALUE (1): invalid argument`. A range with no elements, or on
 driver is asked: `cuMemPrefetchAsync: the range 2..2 has no elements`, or `the range 3..5 goes past the end of the 4
 elements`; `advise` and `placement` say it with their own calls.
 
-The driver here, NVIDIA's open kernel module 615.71.10 on Linux 7.0, takes a NUMA node as the preferred location,
-`PreferredLocation(Numa(node))` or `PreferredLocation(NumaOfThread)`, and changes nothing: the memory prefers what it
-did before, the GPU, the host or no place, and `preferred` says so. CUDA's header says the driver sets the node and says
-it back as a NUMA node, which this one does not.
+The driver here takes a NUMA node as the preferred location, `PreferredLocation(Numa(node))` or
+`PreferredLocation(NumaOfThread)`, and changes nothing: the memory prefers what it did before, the GPU, the host or no
+place, and `preferred` says so. CUDA's header says the driver sets the node and says it back as a NUMA node, which this
+one does not.
 
 The driver works on whole pages, 4 KiB. A range reaches all of each page it touches, the rest of the page too, whether
 it is the memory of the same buffer or of another. A managed buffer starts at a multiple of 512 bytes, not at a page, so
 it shares the pages at its ends with the buffers beside it, and a range from a page to a page reaches just its own.
 
-The driver here, NVIDIA's open kernel module 615.71.10 on Linux 7.0, does not always clear the advice and the last
-prefetch of a buffer it frees, when threads use it at once: a buffer made at that address may start with them, and
-`placement` says so. When one thread uses it, it clears them. They are hints, so no value changes.
+The driver here does not always clear the advice and the last prefetch of a buffer it frees, when threads use it at
+once: a buffer made at that address may start with them, and `placement` says so. When one thread uses it, it clears
+them. They are hints, so no value changes.
 
 `saxpy` becomes the method that launches it, which takes the grid and then the kernel's parameters. They keep the names
 they are written with, but `_`, which the macros name for Rust. The method names the grid `__kernite_grid`, and a

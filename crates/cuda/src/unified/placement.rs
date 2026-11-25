@@ -73,10 +73,10 @@ pub enum Advice {
     /// The memory is not read-mostly: the copies are collapsed into one.
     NotReadMostly,
     /// The memory belongs at this place: when another processor touches it, the driver maps it
-    /// there where it can, and does not move it. The driver here, NVIDIA's open kernel module
-    /// 615.71.10 on Linux 7.0, takes a NUMA node as the place and changes nothing: the memory
-    /// prefers what it did before, the GPU, the host or none. CUDA's header says the driver sets
-    /// the node and says it back as a NUMA node, which this one does not.
+    /// there where it can, and does not move it. The driver here takes a NUMA node as the place and
+    /// changes nothing: the memory prefers what it did before, the GPU, the host or none. CUDA's
+    /// header says the driver sets the node and says it back as a NUMA node, which this one does
+    /// not.
     PreferredLocation(Location),
     /// The memory belongs at no place.
     NoPreferredLocation,
@@ -121,8 +121,8 @@ pub struct Placement {
     /// Whether every page of the range is [`ReadMostly`](Advice::ReadMostly).
     pub read_mostly: bool,
     /// The one place every page of the range prefers; `None` where the pages do not agree, or
-    /// prefer none. The driver here, NVIDIA's open kernel module 615.71.10 on Linux 7.0, never
-    /// says a NUMA node, as it sets none: see [`PreferredLocation`](Advice::PreferredLocation).
+    /// prefer none. The driver here never says a NUMA node, as it sets none: see
+    /// [`PreferredLocation`](Advice::PreferredLocation).
     pub preferred: Option<Location>,
     /// The GPU and the host, whichever of them every page of the range is
     /// [`AccessedBy`](Advice::AccessedBy).
@@ -227,9 +227,8 @@ impl<T: Plain> Unified<'_, T> {
     /// something only where every page of it does. The driver tells the place of managed memory
     /// alone, so page-locked memory and a slice lent are refused: `cuMemRangeGetAttribute: the
     /// driver tells the place of managed memory alone: this is a slice lent`.
-    /// The driver here, NVIDIA's open kernel module 615.71.10 on Linux 7.0, does not always clear
-    /// the advice and the last prefetch of a buffer it frees, when threads use it at once, so a
-    /// buffer made at that address may start with them.
+    /// The driver here does not always clear the advice and the last prefetch of a buffer it frees,
+    /// when threads use it at once, so a buffer made at that address may start with them.
     /// It needs a driver of CUDA 12.2 or later, which brought the attributes of the preferred
     /// place and of the last prefetch with `cuMemAdvise_v2`; an older one is the error of the
     /// lookup of that function, as for [`advise`](Unified::advise). A range with no elements, or one past the end, is
