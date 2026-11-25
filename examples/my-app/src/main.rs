@@ -1478,6 +1478,9 @@ fn main() -> Run {
 }
 
 #[cfg(test)]
+mod traffic;
+
+#[cfg(test)]
 mod tests {
     use std::fs;
     use std::path::Path;
