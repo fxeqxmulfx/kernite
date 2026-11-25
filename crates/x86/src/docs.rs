@@ -27,6 +27,9 @@ movnti : Stores a gpr in memory without keeping the cache line; `sfence` orders 
 lea : Writes to the first operand the address that the second names, and reads no memory.
 xchg : Swaps the two operands. With memory it is atomic, as `lock.xchg` is.
 xadd : Adds the second operand to the first, and writes the old first to the second.
+cmpxchg : Compares the third operand, which is the accumulator, with the first, and sets the flags as `cmp` of the
+    third with the first does. If they are equal it copies the second operand to the first; if not it copies the first
+    to the third. Unequal, of an r32 as the first, AMD's CPUs keep the rest of its gpr and Intel's manual clears it.
 bswap : Reverses the order of the bytes of its operand.
 jmp : Jumps to the label.
 add : Adds the second operand to the first, and sets the flags.
@@ -137,6 +140,9 @@ lock.bts : Copies the bit of memory at the index to the carry flag, and sets it,
     access of another CPU comes between its read and its write.
 lock.xadd : Adds the second operand to memory, and writes the old memory to the second, in one atomic step, so that
     no access of another CPU comes between its read and its write.
+lock.cmpxchg : Compares the third operand, which is the accumulator, with memory, and sets the flags as `cmp` of the
+    third with memory does, in one atomic step, so that no access of another CPU comes between its read and its
+    write. If they are equal it copies the second operand to memory; if not it copies memory to the third.
 lock.xchg : Swaps the two operands in one atomic step, so that no access of another CPU comes between its read and
     its write.
 vaddps : Adds the floats of 32 bits of the last two operands, element by element, into the first.
@@ -869,6 +875,10 @@ fn mark(access: Access) -> &'static str {
 fn meaning(kind: Kind) -> Option<&'static str> {
     Some(match kind {
         Kind::Vec(w) if w < W128 => "`vN` is the low N bits of an xmm.",
+        Kind::Acc(_) => {
+            "`al`, `ax`, `eax` and `rax` are the accumulator, which the listing does not name: a kernel gives a gpr \
+             of that width as the last operand, and kernite places it in `rax`."
+        }
         Kind::Aligned(_) => "`aN` is `mN` at an address that is a multiple of its size.",
         Kind::Addr => "`m` is an address, which the instruction reaches no memory at.",
         Kind::Vsib(..) => {

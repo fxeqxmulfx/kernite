@@ -135,11 +135,14 @@ use crate::bytes;
 use crate::forms::{self, Form, Kind, Miss, Shape};
 use crate::op::Op;
 use crate::operand::ymm;
-use crate::sysv::{CALL_CLOBBERS, FLOAT_PARAMS, FLOAT_RESULT, INT_PARAMS, INT_RESULT, PAGE, SysV};
+use crate::sysv::{CALL_CLOBBERS, FLOAT_PARAMS, FLOAT_RESULT, INT_PARAMS, INT_RESULT, PAGE, RAX, SysV};
 use crate::{order, widths};
 
 /// The operands of an instruction.
 type Args = Vec<Arg<VReg>>;
+
+/// Instructions that follow another, which move variables.
+type Moves = Vec<Inst<Op, VReg>>;
 
 /// The most bytes of stack memory a kernel has: as far past the stack pointer as an address
 /// reaches, whose displacement is 32 bits, signed.
@@ -1540,15 +1543,23 @@ impl Kernel {
         Ok(())
     }
 
-    /// The operands of `form` built from `args`, which fit it, for the instruction `name`; and
-    /// those it reaches without writing them out: the vector of indices of a gather's memory,
-    /// at its width.
-    fn build(&mut self, form: &Form, args: &[Given<Var>], name: &str) -> Result<(Args, Args), Fault> {
-        let (mut out, mut implicit) = (vec![], vec![]);
+    /// The operands of `form` built from `args`, which fit it, for the instruction `name`; those
+    /// it reaches without writing them out: the vector of indices of a gather's memory, at its
+    /// width, and the accumulator; and the moves that follow the instruction, which give the
+    /// accumulator back.
+    fn build(&mut self, form: &Form, args: &[Given<Var>], name: &str) -> Result<(Args, Args, Moves), Fault> {
+        let (mut out, mut implicit, mut back) = (vec![], vec![], vec![]);
+        let mut indices = None;
         for (i, (spec, a)) in form.operands.iter().zip(args).enumerate() {
             let mut access = spec.access;
             let operand = match a {
                 Given::Var(v) if let Some((reg, view)) = v.reg() => {
+                    if let Kind::Acc(w) = spec.kind {
+                        let (acc, give) = self.accumulator(name, i, &out, reg, w, access)?;
+                        implicit.push(acc);
+                        back.push(give);
+                        continue;
+                    }
                     // A write to a gpr's r16 or r8 keeps the rest of it, which it so reads.
                     if access == Write && matches!(view, View::R16 | View::R8) {
                         access = ReadWrite;
@@ -1561,6 +1572,7 @@ impl Kernel {
                     let m = self.memory(a, spec.kind, access, name, i).map_err(|m| Fault::at(i, m))?;
                     if let (Kind::Vsib(_, w), Some((index, _))) = (spec.kind, m.index) {
                         implicit.push(Arg { operand: Operand::Reg(index, w), access: Read });
+                        indices = Some(index);
                     }
                     Operand::Mem(m)
                 }
@@ -1589,10 +1601,10 @@ impl Kernel {
                 ),
             ));
         }
-        if let [Arg { operand: Operand::Reg(index, _), .. }] = implicit.as_slice() {
-            self.apart(name, &out, *index)?;
+        if let Some(index) = indices {
+            self.apart(name, &out, index)?;
         }
-        Ok((out, implicit))
+        Ok((out, implicit, back))
     }
 
     /// Whether the gather `name`, of the operands `out` and at indices in `index`, has its
@@ -1622,6 +1634,35 @@ impl Kernel {
             }
         }
         Ok(())
+    }
+
+    /// The accumulator, the variable `reg` as the operand `at` of the instruction `name`, which follows the operands
+    /// `before` and reads and writes `w` of it with `access`: the operand it reaches without writing it out, and
+    /// the move that gives `reg` back what the instruction leaves in it.
+    ///
+    /// It is `rax`, where kernite places a variable as it places a call's argument and result: in a variable of
+    /// its own pinned there, which a move before the instruction fills. The moves are of the whole gpr, as a
+    /// call's are, so that the instruction changes what it writes of `reg` and no more.
+    fn accumulator(
+        &mut self,
+        name: &str,
+        at: usize,
+        before: &[Arg<VReg>],
+        reg: VReg,
+        w: Width,
+        access: Access,
+    ) -> Result<(Arg<VReg>, Inst<Op, VReg>), Fault> {
+        let held = self.p.var_name(reg).to_string();
+        // The instruction writes the first operand and this, and a variable holds one value.
+        let writes = |a: &Arg<VReg>| a.access != Read && matches!(a.operand, Operand::Reg(r, _) if r == reg);
+        if before.iter().any(writes) {
+            let msg = format!("`{name}` writes its first operand and the accumulator: `{held}` is both");
+            return Err(Fault::at(at, msg));
+        }
+        let pinned = self.new_var(Class::Gpr, &held);
+        self.p.pinned.push((pinned, RAX));
+        self.p.body.push(Item::Inst(SysV.copy(pinned, reg, W64)));
+        Ok((Arg { operand: Operand::Reg(pinned, w), access }, SysV.copy(reg, pinned, W64)))
     }
 
     /// The memory `a`, the operand `arg` of the instruction `name`, which reaches what `kind` says with `access`.
@@ -2443,7 +2484,7 @@ impl Target for Kernel {
             shapes.push(operand_shape(name, a).map_err(|m| Fault::at(i, m))?);
         }
         let form = forms::choose(forms, &shapes).map_err(|miss| missed(name, args, &grid, miss))?;
-        let (built, implicit) = self.build(form, args, name)?;
+        let (built, implicit, back) = self.build(form, args, name)?;
         // The address of a static past `rip`'s reach: the register loads it from the static, which holds it, and goes
         // on by the displacement.
         if let [
@@ -2487,6 +2528,7 @@ impl Target for Kernel {
             None => Flow::Next,
         };
         self.push(form.op, built, implicit, flow);
+        self.p.body.extend(back.into_iter().map(Item::Inst));
         Ok(())
     }
 

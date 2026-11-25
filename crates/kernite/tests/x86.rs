@@ -1114,6 +1114,16 @@ fn a_wrong_operand_is_named_by_what_the_instruction_wants() -> Result {
         ("vzeroupper();", "2:1: kernite does not yet write `vzeroupper`, which clears the upper half of every vector"),
         ("pcmpestri(x, x, 0);", "2:1: kernite writes `pcmpestri` as AVX does: `vpcmpestri`"),
         ("mul(x);", "2:1: kernite does not yet write `mul`, which multiplies `rax` into `rdx:rax`"),
+        (
+            "cmpxchg8b(x);",
+            "2:1: kernite does not yet write `cmpxchg8b`, which compares with `edx:eax`, which it writes, and stores \
+             `ecx:ebx`",
+        ),
+        (
+            "cmpxchg16b(x);",
+            "2:1: kernite does not yet write `cmpxchg16b`, which compares with `rdx:rax`, which it writes, and stores \
+             `rcx:rbx`",
+        ),
         ("imul(x);", "2:1: kernite does not yet write `imul` of 1 operand, which multiplies `rax` into `rdx:rax`"),
         ("shld(x, x);", "2:1: kernite does not yet write `shld` of 2 operands, which shifts by `cl`"),
         (
@@ -4639,6 +4649,127 @@ fn a_ret_of_the_wrong_kind_of_value_is_refused_at_the_ret() {
     }
 }
 
+/// `cmpxchg` compares with the accumulator, `al`, `ax`, `eax` or `rax`, which a kernel names as its last operand, a gpr
+/// of the width of the others, and kernite places in `rax` as it places a call's argument. A take, as a pool's, that
+/// keeps `old` in `rax` has no move but the load, as written by hand.
+#[test]
+fn a_take_with_lock_cmpxchg_has_no_move_but_the_load() -> Result<(), String> {
+    let src = "unsafe extern \"sysv64\" fn take(state: *mut u64) -> u64 {
+    let (old, new): (gpr, gpr);
+    mov(old, [state]);
+    label(again);
+    lea(new, [old + 1]);
+    lock.cmpxchg([state], new, old);
+    jne(again);
+    ret(old);
+}";
+    let want = "# take(gpr) -> gpr
+# frame: 0 bytes aligned to 0, saves []
+# state=rdi old=rax new=rcx
+    mov rax, qword ptr [rdi]
+2:
+    lea rcx, [rax + 1]
+    lock cmpxchg qword ptr [rdi], rcx
+    jne 2b
+    ret
+";
+    assert_eq!(kernite::x86_str(src, "take")?.to_string(), want);
+    Ok(())
+}
+
+/// Where a call between the load and the `lock.cmpxchg` changes `rax`, `old` waits in `rcx`: a move puts it in `rax`
+/// for the `lock.cmpxchg`, and another takes back what the `lock.cmpxchg` leaves there, before the `jne` that reads the
+/// flags, which neither move changes. With the call in the loop, it comes round with it.
+#[test]
+fn a_take_after_a_call_moves_old_to_rax_and_back() -> Result<(), String> {
+    let take = |before_label: &str, after_label: &str| {
+        let body = format!(
+            "let (old, new): (gpr, gpr); mov(old, [x]); {before_label} label(again); {after_label} \
+             lea(new, [old + 1]); lock.cmpxchg([x], new, old); jne(again); ret(old);"
+        );
+        listing("x: *mut u64", " -> u64", &body).map(|l| l.to_string())
+    };
+    let outside = "# k(gpr) -> gpr
+# frame: 0 bytes aligned to 0, saves [], and 8 more so that it calls at a multiple of 16
+# x=rdi old=rcx,rax new=rdx
+    sub rsp, 8
+    mov rcx, qword ptr [rdi]
+    call {f0}
+2:
+    lea rdx, [rcx + 1]
+    mov rax, rcx
+    lock cmpxchg qword ptr [rdi], rdx
+    mov rcx, rax
+    jne 2b
+    add rsp, 8
+    ret
+# f0: writes_rax
+";
+    assert_eq!(take("call(writes_rax);", "")?, outside);
+    // In the loop, the call comes round with it.
+    let inside = outside.replace("    call {f0}\n2:\n", "2:\n    call {f0}\n");
+    assert_eq!(take("", "call(writes_rax);")?, inside);
+    Ok(())
+}
+
+/// Each form of `cmpxchg` of a register and of memory, and of `lock.cmpxchg` of memory, of 8, 16, 32 and 64 bits, keeps
+/// `old` in `rax` and compares it with the first operand at that width, `al`, `ax`, `eax` or `rax`, which `old.r8`,
+/// `old.r16`, `old.r32` and `old` name: it moves nothing.
+#[test]
+fn each_form_of_cmpxchg_compares_in_the_accumulator_of_its_width() -> Result<(), String> {
+    let cases = [
+        ("lock.cmpxchg(byte[x], new.r8, old.r8)", "lock cmpxchg byte ptr [rdi], cl"),
+        ("lock.cmpxchg(word[x], new.r16, old.r16)", "lock cmpxchg word ptr [rdi], cx"),
+        ("lock.cmpxchg(dword[x], new.r32, old.r32)", "lock cmpxchg dword ptr [rdi], ecx"),
+        ("lock.cmpxchg(qword[x], new, old)", "lock cmpxchg qword ptr [rdi], rcx"),
+        ("cmpxchg(byte[x], new.r8, old.r8)", "cmpxchg byte ptr [rdi], cl"),
+        ("cmpxchg(word[x], new.r16, old.r16)", "cmpxchg word ptr [rdi], cx"),
+        ("cmpxchg(dword[x], new.r32, old.r32)", "cmpxchg dword ptr [rdi], ecx"),
+        ("cmpxchg(qword[x], new, old)", "cmpxchg qword ptr [rdi], rcx"),
+        ("cmpxchg(d.r8, new.r8, old.r8)", "cmpxchg dl, cl"),
+        ("cmpxchg(d.r16, new.r16, old.r16)", "cmpxchg dx, cx"),
+        ("cmpxchg(d.r32, new.r32, old.r32)", "cmpxchg edx, ecx"),
+        ("cmpxchg(d, new, old)", "cmpxchg rdx, rcx"),
+    ];
+    for (call, line) in cases {
+        let body =
+            format!("let (old, new, d): (gpr, gpr, gpr); mov(old, [x]); mov(new, [x + 8]); mov(d, [x + 16]); {call};");
+        let want = format!(
+            "mov rax, qword ptr [rdi]\nmov rcx, qword ptr [rdi + 8]\nmov rdx, qword ptr [rdi + 16]\n{line}\nret"
+        );
+        assert_eq!(calling("x: *mut u64", "", &body)?, want, "{call}");
+    }
+    Ok(())
+}
+
+/// The accumulator is a gpr of the width of the other operands, and the instruction takes no other, and the first
+/// operand and the accumulator are two variables, as a variable holds one value: what `cmpxchg` writes of the register
+/// the first operand names, it would write twice.
+#[test]
+fn cmpxchg_refuses_what_no_form_takes() -> Result {
+    let cases = [
+        ("lock.cmpxchg(g, g, g);", "2:56: `lock.cmpxchg` wants memory of 1, 2, 4 or 8 bytes; this is a gpr"),
+        ("lock.cmpxchg(dword[x], g.r32, g.r16);", "2:75: `lock.cmpxchg` wants a gpr's r32; this is a gpr's r16"),
+        ("lock.cmpxchg(dword[x], g.r32, g);", "2:73: `lock.cmpxchg` wants a gpr's r32; this is a gpr"),
+        ("lock.cmpxchg(dword[x], g.r32);", "2:48: `lock.cmpxchg` takes 3 operands, not 2"),
+        ("lock.cmpxchg(dword[x], g.r32, g, g);", "2:48: `lock.cmpxchg` takes 3 operands, not 4"),
+        ("lock.cmpxchg(dword[x], g.r32, 1);", "2:73: `lock.cmpxchg` wants a gpr's r32; this is the integer 1"),
+        (
+            "lock.cmpxchg(dword[x], g.r32, dword[x]);",
+            "2:78: `lock.cmpxchg` wants a gpr's r32; this is 4 bytes of memory",
+        ),
+        ("cmpxchg(g.r32, g.r32, g.r16);", "2:67: `cmpxchg` wants a gpr's r32; this is a gpr's r16"),
+        ("cmpxchg(g, g, g);", "2:57: `cmpxchg` writes its first operand and the accumulator: `g` is both"),
+        ("cmpxchg(g.r16, h.r16, g.r16);", "2:67: `cmpxchg` writes its first operand and the accumulator: `g` is both"),
+    ];
+    for (call, want) in cases {
+        let body = format!("let (g, h): (gpr, gpr); zero(g); zero(h); {call}");
+        let got = compile("x: *const f32", &body).err().ok_or("compile gave Ok")?;
+        assert_eq!(got, want, "{call}");
+    }
+    Ok(())
+}
+
 /// A program of the toolchain: `$var`, or `name` on the path, if it runs.
 fn tool(var: &str, name: &str) -> Option<PathBuf> {
     if let Some(p) = std::env::var_os(var) {
@@ -4670,7 +4801,7 @@ fn call(name: &str, form: &Form, most: bool, float: Option<usize>) -> Result<Str
         };
         args.push(match spec.kind {
             Kind::Vec(w) if float == Some(i) => if w.bytes() == 32 { "f.ymm" } else { "f" }.into(),
-            Kind::Gpr(w) => {
+            Kind::Gpr(w) | Kind::Acc(w) => {
                 body += &format!("let g{i}: gpr; zero(g{i});\n");
                 after += &format!("\n{test}(g{i}, g{i});");
                 if w.bytes() == 8 { format!("g{i}") } else { format!("g{i}.r{}", w.bytes() * 8) }

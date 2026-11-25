@@ -29,6 +29,8 @@ release gives it its version.
 - kernite-cpu runs a closure once for each block, on the threads of a grid, `launch_blocks(grid, n, kernel)`: a thread
   the system puts aside holds the launch back by the block it has, and by no other. A launch of twelve threads costs
   0.2 to 0.4 microseconds more for it, as each kept thread's queue now holds four launches at most.
+- kernite writes x86's `cmpxchg` and `lock.cmpxchg` of each width, and places the variable they compare with in `rax`,
+  as it places a call's arguments: `lock.cmpxchg([p], new, old)`.
 - Breaks: a safe GPU kernel reaches each element whole, and kernite refuses `ld.global.u16` through a `*const u32`, as
   the host may store the whole element while the kernel runs; kernite-cuda's `Cuda::concurrent_managed_access` is gone,
   with the clause of an `unsafe` launch's contract it served; kernite-cuda's `Buffer::tail` and `View` are gone, as
