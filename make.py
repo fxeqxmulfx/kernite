@@ -76,7 +76,12 @@ def check():
     deny = ["--config", 'build.warnings="deny"']
     sh(["cargo", "fmt", "--check"])
     sh(["cargo", "clippy", "-q", "--all-targets", *deny])
-    sh(["cargo", "test", "-q"])
+    sh(["cargo", "test", "-q", "--all-targets"])
+    # Rustdoc checks the error code of a `compile_fail,E0502` doctest only as a nightly build, which `RUSTC_BOOTSTRAP=1`
+    # makes it: on stable it passes the doctest on any error, a typo's too. The doctests alone run so: the other tests,
+    # and the crates their fixtures build, see the stable rustc a user has, and a nightly words some errors otherwise.
+    # Cargo leaves the variable out of a build's fingerprint, so nothing is built twice.
+    sh(["cargo", "test", "-q", "--doc"], env={"RUSTC_BOOTSTRAP": "1"})
     sh(["cargo", "doc", "-q", "--no-deps", "--workspace", *deny])
 
 
