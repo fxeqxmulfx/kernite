@@ -13,7 +13,7 @@ use kernite_build::{Quantity, Why};
 use kernite_lang::{Fault, Operand as Given};
 
 use crate::forms::Space;
-use crate::numbers::{Atom, Numbers, Poly, Step, Val, varies};
+use crate::numbers::{Atom, Numbers, Pointer, Poly, Step, varies};
 use crate::ty::Ty;
 use crate::var::Var;
 
@@ -143,33 +143,21 @@ impl Proof {
             }
             s => return Err(cannot(name, &format!("reaches {} memory, which no pointer of a kernel is to", s.noun()))),
         }
-        let Some((at, m)) = i.args.iter().enumerate().find_map(|(at, a)| match a {
-            Given::Mem(m) => Some((at, m)),
-            _ => None,
-        }) else {
+        let Some((at, m)) = i.memory() else {
             return Err(cannot(name, "reaches memory at no address"));
         };
         // From here on, the address is what is at fault.
         let here = |what: &str| Fault { arg: Some(at), ..cannot(name, what) };
-        let from = match m.base {
-            Some(Var::Reg { reg, .. }) => n.vals.get(&reg.id).cloned(),
-            _ => None,
-        };
-        let pointer = match &from {
-            Some(Val::Addr { pointer, .. }) => n.pointers.get(pointer).map(|p| (*pointer, p.bytes, p.writable)),
-            _ => None,
-        };
-        let (Some(Val::Addr { offset, .. }), Some((pointer, target, writable))) = (from, pointer) else {
-            return Err(here("reaches memory at an address that kernite cannot follow to a pointer of the kernel's"));
+        let lost = || here("reaches memory at an address that kernite cannot follow to a pointer of the kernel's");
+        let (pointer, a) = n.address(m).map_err(|_| lost())?;
+        let Some(&Pointer { bytes: target, writable, .. }) = n.pointers.get(&pointer).filter(|p| p.bytes > 0) else {
+            return Err(lost());
         };
         let write = i.bound.form.op == "st";
         if write && !writable {
             return Err(here("writes through a `*const` pointer, memory lent to be read"));
         }
         let bytes = i128::from(i.reach);
-        let Some(a) = offset.add(&Poly::int(i128::from(m.disp))) else {
-            return Err(here("reaches an address too far for kernite to follow"));
-        };
         if !(1..=target).contains(&bytes) {
             let what = format!("reaches {bytes} bytes at once, more than the {target} of what its pointer is to");
             return Err(here(&what));
@@ -244,19 +232,7 @@ impl Proof {
             true => "writes at an address that is not only its thread's",
             false => "reads memory the kernel may write, at an address that is not only its thread's",
         };
-        let (mut shift, mut block, mut thread) = (Poly::default(), Poly::default(), Poly::default());
-        for (k, &c) in &a.0 {
-            let count = |x| k.iter().filter(|&&a| a == x).count();
-            let rest = k.iter().copied().filter(|a| !matches!(a, Atom::Thread | Atom::Block)).collect();
-            let term = Poly(BTreeMap::from([(rest, c)]));
-            let part = match (count(Atom::Thread), count(Atom::Block)) {
-                (0, 0) => &mut shift,
-                (1, 0) => &mut thread,
-                (0, 1) => &mut block,
-                _ => return Err(not),
-            };
-            *part = part.add(&term).ok_or(not)?;
-        }
+        let (shift, block, thread) = a.parts().ok_or(not)?;
         let width = thread.constant().filter(|&w| w >= 0).ok_or(not)?;
         let (shift, at) = shift.split();
         let end = at.checked_add(bytes).ok_or(not)?;

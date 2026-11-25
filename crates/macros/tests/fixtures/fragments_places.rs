@@ -39,7 +39,9 @@ macro_rules! gpu_operands {
             assert_eq!(line(ptx, "st.global.u32 [%p], 6;"), Some("st.global.u32 [%p], 6;"), "{ptx}");
             assert_eq!(line(ptx, "st.global.s32 [%p], -3;"), Some("st.global.s32 [%p], -3;"), "{ptx}");
             assert_eq!(line(ptx, "st.global.u32 [%p], 8;"), Some("st.global.u32 [%p], 8;"), "{ptx}");
-            assert_eq!(ptx.matches("st.global").count(), 4, "{ptx}");
+            // The listing's report says them too, in comments.
+            let stores = ptx.lines().map(str::trim).filter(|line| line.starts_with("st.global"));
+            assert_eq!(stores.count(), 4, "{ptx}");
             assert!(ptx.contains(".maxntid 96"), "{ptx}");
             assert!(ptx.contains("COUNTSE[24];"), "{ptx}");
         }

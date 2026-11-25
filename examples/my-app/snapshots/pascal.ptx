@@ -4,6 +4,7 @@
 .target sm_60
 .address_size 64
 
+// kernite does not follow a kernel that jumps yet: what its memory moves is not counted
 .visible .entry _ZN7kernite6my_app6pascal9normalizeE(
 	.param .u64 _ZN7kernite6my_app6pascal9normalizeE_param_0,
 	.param .u64 _ZN7kernite6my_app6pascal9normalizeE_param_1,
@@ -169,6 +170,7 @@ $L1:
 	ret;
 }
 
+// kernite does not follow a kernel that jumps yet: what its memory moves is not counted
 .visible .entry _ZN7kernite6my_app6pascal7diffuseE(
 	.param .u64 _ZN7kernite6my_app6pascal7diffuseE_param_0,
 	.param .u64 _ZN7kernite6my_app6pascal7diffuseE_param_1,

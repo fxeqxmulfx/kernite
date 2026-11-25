@@ -110,6 +110,11 @@ $L0:
 \tret;
 }
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   @!%first ld.global.f32 %a, [%at+-4]: 5 sectors for 128 bytes
+//   @!%first ld.global.f32 %b, [%at]: 4 sectors for 128 bytes, all used
+//   st.global.f32 [%out], %v: 4 sectors for 128 bytes, all used
+//   x: each byte is read at most twice
 ";
     assert_eq!(scale, want);
     Ok(())
@@ -3396,6 +3401,10 @@ fn a_function_comes_out_as_ptx_writes_it() -> Result {
 \t.param .u32 gcd_param_1
 );
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.u32 %a, [%x]: 1 sector for 4 bytes, an eighth used
+//   st.global.u32 [%x], %g: 1 sector for 4 bytes, an eighth used
+//   x: each byte is read at most once by every thread
 .visible .entry first(
 \t.param .u64 first_param_0,
 \t.param .u32 first_param_1
@@ -3741,7 +3750,10 @@ fn each_instance_is_a_kernel_of_its_own_named_as_cpp_names_it() -> Result {
         // Declared before `uses`, which names them first.
         "\n.func (.param .s32 _Z6affineILi3ELb1EE_retval) _Z6affineILi3ELb1EE(\n\t.param .s32 \
          _Z6affineILi3ELb1EE_param_0\n);\n\n.func (.param .s32 _Z6affineILin2ELb0EE_retval) \
-         _Z6affineILin2ELb0EE(\n\t.param .s32 _Z6affineILin2ELb0EE_param_0\n);\n\n.visible .entry uses(",
+         _Z6affineILin2ELb0EE(\n\t.param .s32 _Z6affineILin2ELb0EE_param_0\n);\n\n// A warp of 32 threads moves, in \
+         sectors of 32 bytes:\n//   ld.global.s32 %a, [%x]: 1 sector for 4 bytes, an eighth used\n//   st.global.s32 \
+         [%x], %b: 1 sector for 4 bytes, an eighth used\n//   x: each byte is read at most once by every thread\n\
+         .visible .entry uses(",
         "\tcall (%b), _Z6affineILi3ELb1EE, (%a);\n\tcall (%b), _Z6affineILin2ELb0EE, (%b);\n",
         "\tmov.u64 %k, _Z5shiftILj8EE;\n",
         "\tmul.lo.s32 %r, %a, 3;\n\tadd.s32 %r, %r, 1;\n\tst.param.s32 [_Z6affineILi3ELb1EE_retval], %r;\n",
@@ -3939,6 +3951,8 @@ fn a_variable_named_as_a_special_register_takes_a_trailing_underscore() -> Resul
 .target sm_30
 .address_size 64
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   st.global.u32 [%out], %clusterid_: 1 sector for 4 bytes, an eighth used
 .visible .entry k(
 \t.param .u64 k_param_0
 )
@@ -5424,6 +5438,10 @@ fn memory_is_declared_where_ptx_has_it() -> Result {
 
 .extern .shared .align 4 .b8 _ZZ7reverseE3buf[];
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.f32 %v, [%at]: 4 sectors for 128 bytes, all used
+//   @%p st.global.f32 [%at], %v: not counted, as its address comes from an instruction under a guard
+//   x: not told how many times a byte is read, as its blocks may read the same bytes
 ";
     assert_eq!(head, want);
     let block_sum = entries.split(".visible .entry ").next().ok_or("next gave None")?;
@@ -5663,6 +5681,16 @@ fn a_static_is_declared_once_for_each_kernel_to_name() -> Result {
 .const .align 2 .b8 HALVES[4] = {0, 62};
 .global .align 1 .b8 SIGNED[3] = {255, 2};
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.u32 %v, [%at]: 4 sectors for 128 bytes, all used
+//   red.global.add.u32 [%at], 1: not counted, as its address comes from a value loaded from memory
+//   atom.global.add.u32 %v, [COUNTS+8], 1: not counted, as it reaches memory that the module declares, which \
+kernite does not follow yet
+//   ld.global.u64 %s, [SEEN]: not counted, as it reaches memory that the module declares, which kernite does not \
+follow yet
+//   ld.global.s8 %b, [SIGNED+2]: not counted, as it reaches memory that the module declares, which kernite does not \
+follow yet
+//   x: each byte is read at most once by every block
 ";
     assert_eq!(head, want);
     for line in [
@@ -5756,6 +5784,15 @@ fn a_static_the_module_has_no_room_for_is_outside_it() -> Result {
 \tret;
 }
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   st.global.u8 [%BIG], %v: not counted, as it reaches memory that the module declares, which kernite does not \
+follow yet
+//   st.global.u8 [%BIG+6442450943], %v: not counted, as it reaches memory that the module declares, which kernite \
+does not follow yet
+//   atom.global.add.u32 %w, [%BIG+8], 1: not counted, as it reaches memory that the module declares, which kernite \
+does not follow yet
+//   st.global.u64 [%out], %at: 1 sector for 8 bytes, a quarter used
+//   st.global.u64 [%out+8], %g: 1 sector for 8 bytes, a quarter used
 .visible .entry touch(
 \t.param .u64 touch_param_0
 )
@@ -5781,6 +5818,10 @@ fn a_static_the_module_has_no_room_for_is_outside_it() -> Result {
 \tret;
 }
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.u32 %v, [SMALL]: not counted, as it reaches memory that the module declares, which kernite does not \
+follow yet
+//   st.global.u32 [%out], %v: 1 sector for 4 bytes, an eighth used
 .visible .entry small(
 \t.param .u64 small_param_0
 )
@@ -6168,7 +6209,13 @@ fn a_cooperative_kernel_waits_for_its_grid_as_cuda_does() -> Result {
     let ptx = kernite::ptx_str(COOPERATIVE)?;
     // A cooperative launch is from Pascal's GPUs on, and PTX 5.0.
     let (head, reverse) = ptx.split_once(".visible .entry ").ok_or("split_once gave None")?;
-    assert_eq!(head, "// Written by kernite.\n\n.version 5.0\n.target sm_60\n.address_size 64\n\n");
+    // The kernel's own loads and stores come after a guard, which kernite does not follow to what it writes.
+    let report = "// A warp of 32 threads moves, in sectors of 32 bytes:
+//   @!%others ld.global.u32 %t, [%at]: not counted, as its address comes from an instruction under a guard
+//   @!%others st.global.u32 [%at], %t: not counted, as its address comes from an instruction under a guard
+//   x: not told how many times a byte is read, as a load of it is not counted
+";
+    assert_eq!(head, format!("// Written by kernite.\n\n.version 5.0\n.target sm_60\n.address_size 64\n\n{report}"));
     // Each block's first thread adds to the count of the driver's barrier for the grid, the
     // first block's so that it turns over its top bit once all have, and waits for that.
     let sync = "\t{

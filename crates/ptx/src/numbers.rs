@@ -6,11 +6,11 @@
 //! gives it, is a condition on the launch, which the host checks before a kernel with no `unsafe` runs: that the memory
 //! has as many elements as the kernel reaches, and that no number wraps.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use kernite_build::{Quantity, Requirement, Why};
 use kernite_core::VReg;
-use kernite_lang::Operand as Given;
+use kernite_lang::{Mem, Operand as Given};
 
 use crate::forms::Bound;
 use crate::ty::Ty;
@@ -107,6 +107,26 @@ impl Poly {
         (Poly(rest), c)
     }
 
+    /// What it is for each thread, as the part that is the same for each thread, and what multiplies the block's
+    /// index and the thread's, each as a sum of the launch's numbers alone: its terms with neither, with the block's,
+    /// and with the thread's. `None` where a term has more than one, or a factor is past `i128`.
+    pub(crate) fn parts(&self) -> Option<(Poly, Poly, Poly)> {
+        let (mut shift, mut block, mut thread) = (Poly::default(), Poly::default(), Poly::default());
+        for (k, &c) in &self.0 {
+            let count = |x| k.iter().filter(|&&a| a == x).count();
+            let rest = k.iter().copied().filter(|a| !matches!(a, Atom::Thread | Atom::Block)).collect();
+            let term = Poly(BTreeMap::from([(rest, c)]));
+            let part = match (count(Atom::Thread), count(Atom::Block)) {
+                (0, 0) => &mut shift,
+                (1, 0) => &mut thread,
+                (0, 1) => &mut block,
+                _ => return None,
+            };
+            *part = part.add(&term)?;
+        }
+        Some((shift, block, thread))
+    }
+
     /// The most, or the least, it is over every thread of a launch, which is a sum of its own: each product of the
     /// thread's or the block's index, with a factor above 0, takes the index's greatest value, and one below, its
     /// least, 0, or the other way about; the launch's numbers are not less than 0.
@@ -155,6 +175,10 @@ pub(crate) enum Val {
     Addr { pointer: usize, offset: Poly },
     /// What `setp` compared: `left` and `right` are whole numbers.
     Cmp { left: Poly, cmp: Cmp, right: Poly },
+    /// Nothing: where it comes from is none that kernite follows, as the words say, which end what the variable is
+    /// worked out from: `a value loaded from memory`. `from` is the pointer parameter it is worked out from, if it is
+    /// one, by its place among the parameters, so that an address that is lost is still some pointer's.
+    Lost { why: String, from: Option<usize> },
 }
 
 impl Val {
@@ -176,7 +200,9 @@ impl Val {
 /// What is known of a pointer parameter.
 #[derive(Debug)]
 pub(crate) struct Pointer {
-    /// The bytes of what it points to, and so how it is aligned.
+    /// What the kernel calls it.
+    pub(crate) name: String,
+    /// The bytes of what it points to, and so how it is aligned: 0 if kernite does not know them.
     pub(crate) bytes: i128,
     pub(crate) writable: bool,
 }
@@ -201,6 +227,16 @@ pub(crate) struct Step<'a> {
     pub guard: Option<(VReg, bool)>,
     pub written: Vec<u32>,
     pub reach: u64,
+}
+
+impl<'a> Step<'a> {
+    /// The operand that is the address of the instruction's load or store, and its place among the operands.
+    pub(crate) fn memory(&self) -> Option<(usize, &'a Mem<Var>)> {
+        self.args.iter().enumerate().find_map(|(at, a)| match a {
+            Given::Mem(m) => Some((at, m)),
+            _ => None,
+        })
+    }
 }
 
 /// What every launch of a kernel with no `unsafe` holds, whether the kernel says it or not: its grid has fewer than
@@ -229,16 +265,15 @@ impl Numbers {
         Numbers { vals: BTreeMap::new(), pointers: BTreeMap::new(), needs }
     }
 
-    /// The parameter number `index` of the kernel, of type `ty` as written, which is in register `reg`, of type `t`.
-    pub(crate) fn param(&mut self, reg: VReg, index: usize, ty: &str, t: Ty) {
+    /// The parameter number `index` of the kernel, `name`, of type `ty` as written, which is in register `reg`, of type
+    /// `t`.
+    pub(crate) fn param(&mut self, name: &str, reg: VReg, index: usize, ty: &str, t: Ty) {
         let pointer =
             ty.strip_prefix("*const ").map(|to| (to, false)).or_else(|| ty.strip_prefix("*mut ").map(|to| (to, true)));
         if let Some((to, writable)) = pointer {
-            let bytes = size(to);
-            if bytes > 0 {
-                self.pointers.insert(index, Pointer { bytes, writable });
-                self.vals.insert(reg.id, Val::Addr { pointer: index, offset: Poly::default() });
-            }
+            let pointer = Pointer { name: name.to_string(), bytes: size(to), writable };
+            self.pointers.insert(index, pointer);
+            self.vals.insert(reg.id, Val::Addr { pointer: index, offset: Poly::default() });
         } else if matches!(t, Ty::U32 | Ty::U64) {
             self.vals.insert(reg.id, Val::Num(Poly::launch(Quantity::Param(index))));
         }
@@ -265,11 +300,77 @@ impl Numbers {
     /// Takes in the instruction `i`: what it makes of the variables.
     pub(crate) fn follow(&mut self, i: &Step) {
         let value = if i.guard.is_none() { self.value(i) } else { None };
-        for r in &i.written {
-            self.vals.remove(r);
+        if !i.written.is_empty() {
+            let (why, from) = self.why_lost(i);
+            self.lose(&i.written, &why, from);
         }
         if let Some((r, v)) = value {
             self.vals.insert(r, v);
+        }
+    }
+
+    /// Makes the variables `written` hold nothing kernite follows, as `why` says, and worked out from the pointer
+    /// `from`, if there is one.
+    pub(crate) fn lose(&mut self, written: &[u32], why: &str, from: Option<usize>) {
+        for r in written {
+            self.vals.insert(*r, Val::Lost { why: why.to_string(), from });
+        }
+    }
+
+    /// Why what `i` writes is not followed, as `Val::Lost` says, and the pointer it is worked out from, if it is: a
+    /// guard that may leave a variable as it was, a load, an operand that is not followed, or the instruction itself.
+    fn why_lost(&self, i: &Step) -> (String, Option<usize>) {
+        if i.guard.is_some() {
+            return ("an instruction under a guard".into(), self.pointer_of(i));
+        }
+        if i.bound.form.op == "ld" {
+            return ("a value loaded from memory".into(), None);
+        }
+        let unfollowed = |a: &Given<Var>| match (a, self.val(a)) {
+            (Given::Special(s), None) => Some(format!("`{s}`, which kernite does not follow")),
+            (_, Some(Val::Lost { why, .. })) => Some(why),
+            _ => None,
+        };
+        let why = i.args.iter().skip(1).find_map(unfollowed);
+        let why = why.unwrap_or_else(|| format!("what `{}` works out, which kernite does not follow", i.name));
+        (why, self.pointer_of(i))
+    }
+
+    /// The pointer parameter that the operand `a` is, or an address of, or is lost from, if there is one.
+    fn pointer_in(&self, a: &Given<Var>) -> Option<usize> {
+        match self.val(a) {
+            Some(Val::Addr { pointer, .. }) => Some(pointer),
+            Some(Val::Lost { from, .. }) => from,
+            _ => None,
+        }
+    }
+
+    /// The pointer parameter that an operand of `i` is, or an address of, or is lost from, if there is one.
+    fn pointer_of(&self, i: &Step) -> Option<usize> {
+        i.args.iter().skip(1).find_map(|a| self.pointer_in(a))
+    }
+
+    /// Each pointer parameter that one of the operands `args` is, or an address of, or is lost from.
+    pub(crate) fn pointers_in<'a>(&self, args: impl IntoIterator<Item = &'a Given<Var>>) -> Vec<usize> {
+        let found: BTreeSet<usize> = args.into_iter().filter_map(|a| self.pointer_in(a)).collect();
+        found.into_iter().collect()
+    }
+
+    /// Where `m` is, as a pointer parameter and the bytes from where it points, or why it is not followed, and the
+    /// pointer it is worked out from, if that is known.
+    pub(crate) fn address(&self, m: &Mem<Var>) -> Result<(usize, Poly), (Option<usize>, String)> {
+        let held = match m.base {
+            Some(Var::Reg { reg, .. }) => self.vals.get(&reg.id),
+            _ => None,
+        };
+        match held {
+            Some(Val::Addr { pointer, offset }) => {
+                offset.add(&Poly::int(i128::from(m.disp))).map(|offset| (*pointer, offset)).ok_or_else(|| {
+                    (Some(*pointer), "its address is too far from its pointer for kernite to follow".into())
+                })
+            }
+            Some(Val::Lost { why, from }) => Err((*from, format!("its address comes from {why}"))),
+            _ => Err((None, "its address is not an address of a pointer of the kernel's".into())),
         }
     }
 
@@ -396,6 +497,6 @@ impl Numbers {
 }
 
 /// The greatest number that divides `a` and `b`.
-fn gcd(a: i128, b: i128) -> i128 {
+pub(crate) fn gcd(a: i128, b: i128) -> i128 {
     if b == 0 { a } else { gcd(b, a % b) }
 }

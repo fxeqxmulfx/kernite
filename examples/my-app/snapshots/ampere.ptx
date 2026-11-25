@@ -4,6 +4,7 @@
 .target sm_80
 .address_size 64
 
+// kernite does not follow a kernel that jumps yet: what its memory moves is not counted
 .visible .entry _ZN7kernite6my_app6ampere6matmulE(
 	.param .u64 _ZN7kernite6my_app6ampere6matmulE_param_0,
 	.param .u64 _ZN7kernite6my_app6ampere6matmulE_param_1,

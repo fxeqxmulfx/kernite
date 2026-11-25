@@ -64,6 +64,9 @@ fn ptx_compiles_a_kernel_through_the_port() -> Result {
 
 .global .align 4 .b8 _ZN7kernite3gpu6COUNTSE[16] = {1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4};
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   red.global.add.u32 [_ZN7kernite3gpu6COUNTSE+4], %x: not counted, as it reaches memory that the module declares, \
+which kernite does not follow yet
 .visible .entry _ZN7kernite3gpu5countE(
 \t.param .u32 _ZN7kernite3gpu5countE_param_0
 )
@@ -212,6 +215,10 @@ fn a_function_the_kernels_call_is_a_func() -> Result {
 \tret;
 }
 
+// A warp of 32 threads moves, in sectors of 32 bytes:
+//   ld.global.u32 %x, [%p]: 1 sector for 4 bytes, an eighth used
+//   st.global.u32 [%p], %x: 1 sector for 4 bytes, an eighth used
+//   p: each byte is read at most once by every thread
 .visible .entry _ZN7kernite3gpu1kILj1EEE(
 \t.param .u64 _ZN7kernite3gpu1kILj1EEE_param_0
 )
