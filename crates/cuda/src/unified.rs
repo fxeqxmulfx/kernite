@@ -755,7 +755,6 @@ pub(crate) mod tests {
     use std::cell::{Cell, RefCell};
     use std::ffi::{c_uint, c_void};
     use std::sync::atomic::Ordering;
-    use std::time::{Duration, Instant};
 
     use super::super::tests::{
         ELSEWHERE, ask, asked, begin_capture, create_stream, destroy_graph, destroy_stream, end_capture, gives_back,
@@ -1357,22 +1356,34 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    /// How many times this thread has given up its CPU, as Linux counts it: of itself, to sleep, or as the scheduler
+    /// took it.
+    fn switches() -> Result<u64> {
+        let status = std::fs::read_to_string("/proc/thread-self/status")?;
+        let counts = status.lines().filter_map(|line| {
+            line.strip_prefix("voluntary_ctxt_switches:").or_else(|| line.strip_prefix("nonvoluntary_ctxt_switches:"))
+        });
+        counts.map(|count| Ok(count.trim().parse::<u64>()?)).sum()
+    }
+
     /// A drop that waits for the GPU, as that of a slice lent does, finds a capture of another thread refuse the
-    /// call, and the call is made again until it is not refused, with a little time between the tries, which keeps no
-    /// core busy for as long as the other thread's closure runs. Where a capture of this thread is on too, it is ended
+    /// call, and the call is made again until it is not refused, with a sleep between the tries, which keeps no core
+    /// busy for as long as the other thread's closure runs. Where a capture of this thread is on too, it is ended
     /// first, as the call is refused while it is on, and begun again after the call is made.
     #[test]
     fn a_drop_waits_out_the_capture_of_another_thread_trying_the_call_again_after_a_little_while() -> Result {
         let cuda = capturing(&[PAGEABLE_MEMORY_ACCESS])?;
         let mut host = [1u32, 2, 3];
         let lent = cuda.lend(&mut host)?;
-        // The call is refused 50 times: the first try, and 49 tries more, each after a little while.
+        // The call is refused 50 times: the first try, and 49 tries more, each after a sleep, in which the thread
+        // gives up its CPU. A drop that spun between the tries would give it up as the scheduler took it alone, which
+        // it does not do 49 times in the microseconds the tries take.
         ELSEWHERE.set(50);
-        let started = Instant::now();
+        let before = switches()?;
         drop(lent);
-        let waited = started.elapsed();
+        let switched = switches()? - before;
         assert_eq!(asked(), ["cuCtxSynchronize"; 51], "50 tries are refused, and the next is made");
-        assert!(waited >= Duration::from_millis(4), "the drop tried 49 times in {waited:?}, with no time between");
+        assert!(switched >= 49, "the drop tried 49 times and gave up its CPU {switched} times: no sleep between");
 
         let mut host = [1u32, 2, 3];
         let lent = cuda.lend(&mut host)?;

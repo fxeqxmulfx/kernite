@@ -1,14 +1,23 @@
-//! What the tests that keep a stream busy have in common: five kernels, written by hand, two of which hold work back
-//! until the host writes a flag or the GPU's clock says a time has gone by, one that copies a word, to show when the
-//! work after it runs, and two that change the words they are given, each its own way, to show in what order they ran;
-//! the way every kernel of the tests takes its start from that clock; the lock that keeps the other tests of a file off
-//! the null stream, which is the GPU's and not a thread's; and the host's reads and writes of the words the kernels
-//! share.
+//! What the tests that keep a stream busy have in common: six kernels, written by hand. `waits` holds work back until
+//! the host writes a flag, or looks for a word that other work writes, a number of times. `pauses` holds work back for
+//! a number of looks. `sets` writes a word, at once or after a time by the GPU's clock. `copies` copies a word, to show
+//! when the work after it runs. `adds_one` and `doubles` change the words they are given, each its own way, to show in
+//! what order they ran. Then the way a kernel of the tests takes its start from that clock; the lock that keeps the
+//! other tests of a file off the null stream, which is the GPU's and not a thread's; the host's reads and writes of the
+//! words the kernels share; and the way the host lets a kernel go while it is in a call that waits for it.
+//!
+//! No test holds a time. A kernel that holds work back waits for the host, and gives up only in a hang. A kernel that
+//! must not see a word looks for it a number of times, from when the host has done what the test asks of it: what
+//! runs beside it writes the word long before it is done, and what is queued behind it cannot.
 #![allow(dead_code, reason = "a test file takes what it needs of this module, and rustc calls the rest dead")]
 
 use std::ffi::c_void;
-use std::sync::atomic::Ordering;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use kernite_cuda::{Cuda, Grid, Module, Ptr, Stream, Unified, arg};
 
@@ -49,36 +58,54 @@ pub fn ptx_for(target: &str, kernels: &str) -> String {
 
 /// The kernels.
 ///
-/// `waits(flag, out, nanos)` spins until `*flag` is not 0, or until `nanos` nanoseconds have gone by; then it writes 1
-/// to `*out` if it saw the flag, and 2 if the time went by first. `sets(flag, nanos)` writes 1 to `*flag` after `nanos`
-/// nanoseconds. `copies(from, to)` writes the word `*from` to `*to`. `adds_one` and `doubles` are below.
+/// `waits(flag, out, looks)` looks at `*flag` until it is not 0, `looks` times at most; then it writes 1 to `*out` if
+/// it saw it, and 2 if not. `pauses(looks)` looks `looks` times at a word of the module's own, which nothing writes.
+/// `sets(flag, nanos)` writes 1 to `*flag` after `nanos` nanoseconds. `copies(from, to)` writes the word `*from` to
+/// `*to`. `adds_one` and `doubles` are below.
 const PTX: &str = "
-.visible .entry waits(.param .u64 flag_param, .param .u64 out_param, .param .u64 nanos_param)
+.visible .entry waits(.param .u64 flag_param, .param .u64 out_param, .param .u64 looks_param)
 {
-	.reg .u64 %flag, %out, %nanos, %start, %now, %gone;
+	.reg .u64 %flag, %out, %looks;
 	.reg .u32 %word;
-	.reg .pred %set, %early;
+	.reg .pred %clear, %over;
 
 	ld.param.u64 %flag, [flag_param];
 	ld.param.u64 %out, [out_param];
-	ld.param.u64 %nanos, [nanos_param];
+	ld.param.u64 %looks, [looks_param];
 	cvta.to.global.u64 %flag, %flag;
 	cvta.to.global.u64 %out, %out;
-	call (%start), clock_start, ();
-SPIN:
+LOOK:
+	setp.eq.u64 %over, %looks, 0;
+	@%over bra NOT_SEEN;
+	sub.u64 %looks, %looks, 1;
 	ld.volatile.global.u32 %word, [%flag];
-	setp.ne.u32 %set, %word, 0;
-	@%set bra SEEN;
-	mov.u64 %now, %globaltimer;
-	sub.u64 %gone, %now, %start;
-	setp.lt.u64 %early, %gone, %nanos;
-	@%early bra SPIN;
+	setp.eq.u32 %clear, %word, 0;
+	@%clear bra LOOK;
+	mov.u32 %word, 1;
+	st.volatile.global.u32 [%out], %word;
+	ret;
+NOT_SEEN:
 	mov.u32 %word, 2;
 	st.volatile.global.u32 [%out], %word;
 	ret;
-SEEN:
-	mov.u32 %word, 1;
-	st.volatile.global.u32 [%out], %word;
+}
+
+.global .u32 never;
+
+.visible .entry pauses(.param .u64 looks_param)
+{
+	.reg .u64 %looks;
+	.reg .u32 %word;
+	.reg .pred %over;
+
+	ld.param.u64 %looks, [looks_param];
+LOOK:
+	setp.eq.u64 %over, %looks, 0;
+	@%over bra DONE;
+	sub.u64 %looks, %looks, 1;
+	ld.volatile.global.u32 %word, [never];
+	bra LOOK;
+DONE:
 	ret;
 }
 
@@ -158,7 +185,7 @@ DONE:
 ";
 
 /// The kernels of `PTX`, in the order `Module::load` is given their names.
-const KERNELS: &[&str] = &["waits", "sets", "copies", "adds_one", "doubles"];
+const KERNELS: &[&str] = &["waits", "sets", "copies", "adds_one", "doubles", "pauses"];
 pub const WAITS: usize = 0;
 pub const SETS: usize = 1;
 pub const COPIES: usize = 2;
@@ -166,23 +193,33 @@ pub const COPIES: usize = 2;
 /// for an `n` of 32 or less, one block's threads: `(x + 1) * 2` is not `x * 2 + 1`, so the order they ran in shows.
 pub const ADDS_ONE: usize = 3;
 pub const DOUBLES: usize = 4;
+pub const PAUSES: usize = 5;
 
-/// What `waits` writes: that it saw the flag, or that the time went by first.
+/// What `waits` writes: that it saw the flag, or that it looked as many times as it was told to and did not.
 pub const SEEN: u32 = 1;
-pub const TIMED_OUT: u32 = 2;
+pub const NOT_SEEN: u32 = 2;
 
-/// How long `hold` gives the host to write the flag: five seconds, much more than the host takes. The kernel returns
-/// as soon as it sees the flag, so the time is spent only where a call kept the host from writing it.
-pub const FOR_THE_HOST: u64 = 5_000_000_000;
+/// How many times `waits` looks at a flag that the host or other work is to write, before it gives up: about 50 s on
+/// page-locked memory and 8 s on the GPU's own, here. It returns as soon as it sees the flag, so the time is spent only
+/// in a hang.
+pub const HANG: u64 = 1 << 26;
 
-/// How long `waits` waits for the flag, in nanoseconds, where it must see it: a second, much more than `sets` takes to
-/// run beside it. It returns as soon as it sees the flag, so the second is not spent.
-pub const A_SECOND: u64 = 1_000_000_000;
-/// And where it must not: a `sets` that ran beside it would write the flag at once, so a tenth of a second shows the
-/// same, and it is spent.
-pub const A_TENTH: u64 = 100_000_000;
+/// And at a word that work beside it must not write: about 12 ms on page-locked memory and 2 ms on the GPU's own, here.
+/// What runs beside it writes the word in microseconds, so these looks show it as a hang's would, and they are spent.
+pub const LOOKS: u64 = 1 << 14;
+
 /// `sets` at once.
 pub const AT_ONCE: u64 = 0;
+
+/// How long the host waits for what must come before it says that it never came: only a hang takes this long.
+pub const HOST_HANG: Duration = Duration::from_secs(60);
+
+/// How much CPU a thread spends in a call that waits for a kernel before `release_while` writes the flag that holds the
+/// kernel back: far more than a call takes that does not wait. The driver spins while it waits for the GPU, here, with
+/// one context and twelve CPUs: the thread runs, and its CPU time grows. It does so while no other thread of the test
+/// is in the driver: a call of another may hold a lock of the driver that this thread sleeps on, with no CPU spent, so
+/// the tests that take `release_while` go one at a time, as `cuda` sees to.
+pub const IN_THE_CALL: Duration = Duration::from_millis(5);
 
 /// Held by each test of a file that takes it, from its start to its end.
 static ALONE: Mutex<()> = Mutex::new(());
@@ -220,10 +257,24 @@ pub fn launch(module: &Module, kernel: usize, args: &[*const c_void]) -> Result 
 }
 
 /// Launches `waits` on the current stream of its GPU, to hold back what is queued after it on that stream until the
-/// host writes `flag`, with `poke`, or `FOR_THE_HOST` goes by. The kernel writes `SEEN` to `out` if it saw the flag,
-/// and `TIMED_OUT` if the time went by first.
+/// host writes `flag`, with `poke` or `release_while`. The kernel writes `SEEN` to `out` if it saw the flag, and
+/// `NOT_SEEN` if it did not in `HANG` looks.
 pub fn hold(module: &Module, flag: Ptr<u32>, out: Ptr<u32>) -> Result {
-    launch(module, WAITS, &[arg(&flag), arg(&out), arg(&FOR_THE_HOST)])
+    launch(module, WAITS, &[arg(&flag), arg(&out), arg(&HANG)])
+}
+
+/// Launches `pauses` on the current stream of its GPU, for `LOOKS`: work that runs beside it, which was queued before
+/// it started, is done before it is, and work queued behind it is not.
+pub fn pause(module: &Module) -> Result {
+    launch(module, PAUSES, &[arg(&LOOKS)])
+}
+
+/// Launches on the current stream of its GPU a `waits` that `hold` holds until the host writes `go`, and that then
+/// looks at `flag` `looks` times at most, and writes to `out` whether it saw it. Its looks start once the host has done
+/// what it does before it writes `go`, however slow the host is to do it.
+pub fn watch(module: &Module, go: Ptr<u32>, flag: Ptr<u32>, out: Ptr<u32>, looks: u64) -> Result {
+    hold(module, go, out)?;
+    launch(module, WAITS, &[arg(&flag), arg(&out), arg(&looks)])
 }
 
 /// What the page-locked word `at` holds now. It is read where it is, by `atomics`, and not by `host`, which waits for
@@ -240,4 +291,55 @@ pub fn poke(at: &mut Unified<'_, u32>, value: u32) {
     if let Some(word) = at.atomics().first() {
         word.store(value, Ordering::Release);
     }
+}
+
+/// Calls `call`, which is to wait for a kernel that the page-locked word `flag` holds back, and has another thread
+/// write the flag while this one is in the call: once this thread has spent `IN_THE_CALL` of CPU in it. What the call
+/// gives; or, where the call returned before the flag was written, that it did not wait for the kernel.
+pub fn release_while<R>(flag: &mut Unified<'_, u32>, call: impl FnOnce() -> R) -> Result<R> {
+    let word = flag.atomics().first().ok_or("the flag has no word")?;
+    let (caller, returned) = (me()?, AtomicBool::new(false));
+    let start = cpu(&caller)?;
+    thread::scope(|scope| {
+        let releaser = scope.spawn(|| {
+            let waited = until("a call that waits for a kernel to spend its CPU on the wait", || {
+                Ok(returned.load(Ordering::Acquire) || cpu(&caller)? >= start + IN_THE_CALL)
+            });
+            // The flag is written whether or not the call returned, so that the kernel ends.
+            word.store(1, Ordering::Release);
+            waited
+        });
+        let got = call();
+        // This thread spent less than `IN_THE_CALL` on its CPU if the call did not wait, and the flag is still 0.
+        let early = word.load(Ordering::Acquire) == 0;
+        returned.store(true, Ordering::Release);
+        releaser.join().map_err(|_| "the thread that writes the flag panicked")??;
+        if early {
+            return Err("the call returned before the flag was written: it did not wait for the kernel it holds".into());
+        }
+        Ok(got)
+    })
+}
+
+/// The directory in `/proc` of the calling thread, `/proc/<pid>/task/<tid>`, which `/proc/thread-self` links to.
+pub fn me() -> Result<PathBuf> {
+    Ok(Path::new("/proc").join(fs::read_link("/proc/thread-self")?))
+}
+
+/// How long the thread whose directory in `/proc` is `task` has run on a CPU, as Linux counts it.
+pub fn cpu(task: &Path) -> Result<Duration> {
+    let stat = fs::read_to_string(task.join("schedstat"))?;
+    Ok(Duration::from_nanos(stat.split(' ').next().ok_or("schedstat is empty")?.parse()?))
+}
+
+/// Waits until `now` says it has come, and says that `what` did not if it has not in `HOST_HANG`, as in a hang.
+pub fn until(what: &str, mut now: impl FnMut() -> Result<bool>) -> Result {
+    let hang = Instant::now() + HOST_HANG;
+    while !now()? {
+        if Instant::now() > hang {
+            return Err(format!("{what}: not in {HOST_HANG:?}, a hang").into());
+        }
+        thread::yield_now();
+    }
+    Ok(())
 }
