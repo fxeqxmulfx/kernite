@@ -577,29 +577,32 @@ it. kernite holds each vector variable to how many of its low bits are the kerne
 with, and all 256 of any other; and then what each instruction that writes it makes of it. An instruction that reads
 more of it, on any way to the instruction, is an error at the instruction, which names the variable: `vmovups([p], x)`
 of an `f32` `x` reads 128 bits of it and `vmovups([p], x.ymm)` 256, where `vmovss([p], x)` reads its 32. The variable is
-whole once the kernel has written all of it, with `zero(x)`, a load, or an instruction that computes all of an xmm or a
-ymm, as `vaddps` does. A scalar instruction writes the float alone, and carries the rest of its first source to the same
-place of its result: `vaddss(y, x, z)` leaves `y` the bits of `x` past the float, where `vaddss(y, w, z)` makes all of
-`y` the kernel's own if `w` is. An instruction that carries bits does not read them, and its result is the kernel's own
-as far as every bit it carries is: a move of a whole register, `vmovaps(y, x)`; the logic of bits, `vandps(x, x, mask)`,
-with which Rust takes the absolute value of a float, and `vxorps(x, x, x)`, which carries the bits of `x` though it
-computes zero, where `zero(x)` writes all of it; a blend, `vblendps(y, x, z, 1)` by a number, which takes each lane from
-one source, and `vblendvps(y, x, z, m)` by a register, whose selector counts in whole lanes; and what a merge keeps: the
-rest of the first source of a scalar instruction, the half that `vmovhps`, `vmovlps` and `vmovhlps` keep, the lanes that
-`vinsertps`, `vpinsrd` and `vinsertf128` leave, the element of each half of its first source that `vunpcklpd` leaves in
-place, and of its second that `vunpckhpd` does, the last element of the second source of `vunpckhps`, and the lanes of
-its result that a gather's mask leaves out. An instruction that picks lanes by a number known now reads the lanes it
-picks and no more: `vextractps(g, x, 0)` and `vpshufd(y, x, 0)` read 32 bits of `x`, and `vdpps(y, x, z, 0x11)`, which
-multiplies the first lanes alone, 32 of each. One that takes part of each 128 bits reads as far as the last part it
-takes: `vunpcklps` and `vmovddup` the low 64 bits of each, and `vmovsldup` and `vpmuludq` the even lanes, so 64 and 96
-bits of an xmm, and 192 and 224 of a ymm. A function of the module is held to it as a kernel is. A call reads each
-argument as far as its callee takes it, 32 bits of an `f32` and 64 of an `f64`, so `call(r, scale, (x, n))` of an `f32`
-`x`, where `scale` takes an `f64`, is an error; at an address with no functions given, it reads a float as the float,
-and any other vector as the call names it, an xmm or all of a ymm, so `x.ymm` of a float is an error there. What a call
-gives back is the kernel's own as far as the call would read it as an argument: 32 or 64 bits of a float that its callee
-gives back, and at an address with no functions given, a float as the float, and any other vector as the call names it.
-`ret(v)` reads `v` as far as the kernel gives it back, 32 bits of an `f32` and 64 of an `f64`, so `ret(x)` of an `f32`
-`x`, where the kernel gives back an `f64`, is an error.
+whole once the kernel has written all of it, with `zero(x)`, a load, an instruction that computes all of an xmm or a
+ymm, as `vaddps` does, or an idiom on one register. An idiom on one register gives the same bits whatever the register
+holds, so it reads nothing of it and writes all of it, as `zero` and `ones` do, and may be the first to write a
+variable: zero from `xor` and `sub` of a gpr's 64 or 32 bits and itself, and from `vxorps`, `vxorpd`, `vpxor`, `vpsub`
+and `vpcmpgt` of a vector and itself; ones from `vpcmpeq`. A scalar instruction writes the float alone, and carries the
+rest of its first source to the same place of its result: `vaddss(y, x, z)` leaves `y` the bits of `x` past the float,
+where `vaddss(y, w, z)` makes all of `y` the kernel's own if `w` is. An instruction that carries bits does not read
+them, and its result is the kernel's own as far as every bit it carries is: a move of a whole register, `vmovaps(y, x)`;
+the logic of bits, `vandps(x, x, mask)`, with which Rust takes the absolute value of a float; a blend,
+`vblendps(y, x, z, 1)` by a number, which takes each lane from one source, and `vblendvps(y, x, z, m)` by a register,
+whose selector counts in whole lanes; and what a merge keeps: the rest of the first source of a scalar instruction, the
+half that `vmovhps`, `vmovlps` and `vmovhlps` keep, the lanes that `vinsertps`, `vpinsrd` and `vinsertf128` leave, the
+element of each half of its first source that `vunpcklpd` leaves in place, and of its second that `vunpckhpd` does, the
+last element of the second source of `vunpckhps`, and the lanes of its result that a gather's mask leaves out. An
+instruction that picks lanes by a number known now reads the lanes it picks and no more: `vextractps(g, x, 0)` and
+`vpshufd(y, x, 0)` read 32 bits of `x`, and `vdpps(y, x, z, 0x11)`, which multiplies the first lanes alone, 32 of each.
+One that takes part of each 128 bits reads as far as the last part it takes: `vunpcklps` and `vmovddup` the low 64 bits
+of each, and `vmovsldup` and `vpmuludq` the even lanes, so 64 and 96 bits of an xmm, and 192 and 224 of a ymm. A
+function of the module is held to it as a kernel is. A call reads each argument as far as its callee takes it, 32 bits
+of an `f32` and 64 of an `f64`, so `call(r, scale, (x, n))` of an `f32` `x`, where `scale` takes an `f64`, is an error;
+at an address with no functions given, it reads a float as the float, and any other vector as the call names it, an xmm
+or all of a ymm, so `x.ymm` of a float is an error there. What a call gives back is the kernel's own as far as the call
+would read it as an argument: 32 or 64 bits of a float that its callee gives back, and at an address with no functions
+given, a float as the float, and any other vector as the call names it. `ret(v)` reads `v` as far as the kernel gives it
+back, 32 bits of an `f32` and 64 of an `f64`, so `ret(x)` of an `f32` `x`, where the kernel gives back an `f64`, is an
+error.
 
 Stack memory a kernel declares is a variable, as a GPU kernel's local memory is: `let tables: local<[u32; 1024], 32>;`
 is 4 KB of its frame at a multiple of 32, reached by its name, `mov(c.r32, [tables + b * 4])`, and `lea(p, [tables])`

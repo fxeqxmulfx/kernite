@@ -1428,10 +1428,8 @@ fn a_kernel_reads_no_more_of_a_float_it_takes_than_the_float() {
             ("vmovups", 128, 32, "x"),
         ),
         ("x: f32, y: f32, p: *mut f64", "vcvtss2sd(x, x, y);\nvmovupd([p], x);", "3:1", ("vmovupd", 128, 64, "x")),
-        // An instruction that carries a register carries it as it was: `vmovaps(x, x)` leaves `x` as it was, and so
-        // does `vxorps(x, x, x)`, which computes zero but does not read `x`. `zero(x)` writes it.
+        // An instruction that carries a register carries it as it was: `vmovaps(x, x)` leaves `x` as it was.
         ("x: f32, p: *mut f32", "vmovaps(x, x);\nvmovups([p], x);", "3:1", ("vmovups", 128, 32, "x")),
-        ("x: f32, p: *mut f32", "vxorps(x, x, x);\nvmovups([p], x);", "3:1", ("vmovups", 128, 32, "x")),
         // The bits go to the variable the instruction writes, whatever it is: one made with `let`, and a ymm, which
         // a move of a whole register fills with them.
         (
@@ -1473,6 +1471,17 @@ fn a_kernel_reads_a_float_it_takes_as_a_float_and_whole_once_it_has_written_it()
         (
             "x: f32, p: *mut f32",
             "ones(x);\nvmovups([p], x);",
+            "vpcmpeqd xmm0, xmm0, xmm0\nvmovups xmmword ptr [rdi], xmm0\nret",
+        ),
+        // An idiom that gives the same bits whatever the register holds writes all of it, as `zero` and `ones` do.
+        (
+            "x: f32, p: *mut f32",
+            "vxorps(x, x, x);\nvmovups([p], x);",
+            "vxorps xmm0, xmm0, xmm0\nvmovups xmmword ptr [rdi], xmm0\nret",
+        ),
+        (
+            "x: f32, p: *mut f32",
+            "vpcmpeqd(x, x, x);\nvmovups([p], x);",
             "vpcmpeqd xmm0, xmm0, xmm0\nvmovups xmmword ptr [rdi], xmm0\nret",
         ),
         (
@@ -1688,8 +1697,43 @@ fn rustcs_code_for_a_float_compiles_as_it_is() {
     ] {
         assert_eq!(compile("x: f32, y: f64, p: *mut f64", body).as_deref(), Ok(want), "{body}");
     }
-    // The bits that `vxorps(x, x, x)` carries are the caller's still, and `zero(x)` writes them.
-    assert_eq!(compile("x: f32, p: *mut f32", "zero(x);\nvxorps(x, x, x);\nvmovups([p], x);").map(|_| ()), Ok(()));
+}
+
+/// An idiom on one register gives the same bits whatever the register holds, so it reads nothing of it, writes all of
+/// it, and may be the first to write a variable: zero from `xor` and `sub` of a gpr's 64 or 32 bits and itself, and
+/// from the `vxorps`, `vpxor`, `vpsub` and `vpcmpgt` of a vector and itself; ones from its `vpcmpeq`. `xor` of 16 bits
+/// leaves the rest of the gpr as it was, and an instruction of two registers reads them.
+#[test]
+fn an_idiom_on_one_register_reads_nothing_of_it() {
+    let cases = [
+        (
+            "let z: ymm;\nvpxor(z.xmm, z.xmm, z.xmm);\nvmovups([p], z);",
+            "vpxor xmm0, xmm0, xmm0\nvmovups ymmword ptr [rdi], ymm0",
+        ),
+        ("let z: ymm;\nvpsubq(z, z, z);\nvmovups([p], z);", "vpsubq ymm0, ymm0, ymm0\nvmovups ymmword ptr [rdi], ymm0"),
+        (
+            "let z: ymm;\nvpcmpgtb(z, z, z);\nvmovups([p], z);",
+            "vpcmpgtb ymm0, ymm0, ymm0\nvmovups ymmword ptr [rdi], ymm0",
+        ),
+        (
+            "let o: ymm;\nvpcmpeqb(o, o, o);\nvmovups([p], o);",
+            "vpcmpeqb ymm0, ymm0, ymm0\nvmovups ymmword ptr [rdi], ymm0",
+        ),
+        ("let g: gpr;\nxor(g.r32, g.r32);\nmov([p], g);", "xor eax, eax\nmov qword ptr [rdi], rax"),
+        ("let g: gpr;\nsub(g, g);\nmov([p], g);", "sub rax, rax\nmov qword ptr [rdi], rax"),
+    ];
+    for (body, want) in cases {
+        let code = compile("p: *mut u64", body);
+        assert!(code.as_deref().is_ok_and(|c| c.starts_with(want)), "{body}\n{code:?}");
+    }
+    let refused = [
+        ("let g: gpr;\nxor(g.r16, g.r16);", "2:5: `g` is read before anything writes it"),
+        ("let (v, w): (ymm, ymm);\nzero(w);\nvpxor(v, v, w);", "2:6: `v` is read before anything writes it"),
+        ("let v: ymm;\nvpand(v, v, v);", "2:5: `v` is read before anything writes it"),
+    ];
+    for (body, want) in refused {
+        assert_eq!(compile("p: *mut u64", body), Err(want.to_string()), "{body}");
+    }
 }
 
 /// A call reads what it passes as far as its callee takes it, and gives back what its callee gives: 32 bits of an

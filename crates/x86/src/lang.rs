@@ -2484,7 +2484,8 @@ impl Target for Kernel {
             shapes.push(operand_shape(name, a).map_err(|m| Fault::at(i, m))?);
         }
         let form = forms::choose(forms, &shapes).map_err(|miss| missed(name, args, &grid, miss))?;
-        let (built, implicit, back) = self.build(form, args, name)?;
+        let (mut built, implicit, back) = self.build(form, args, name)?;
+        idiom(form.op, &mut built);
         // The address of a static past `rip`'s reach: the register loads it from the static, which holds it, and goes
         // on by the displacement.
         if let [
@@ -2561,6 +2562,30 @@ impl Target for Kernel {
 
     fn inst_at(&mut self, at: Span, operands: &[Span]) {
         self.starts.push((self.p.body.len(), at, operands.to_vec()));
+    }
+}
+
+/// The instructions that give the same bits whatever their operands hold, where all are one register: zeros,
+/// `vpxor(x, x, x)` and `xor(g, g)`, or ones, `vpcmpeqd(x, x, x)`.
+const IDIOMS: &[&str] = &[
+    "xor", "sub", "vxorps", "vxorpd", "vpxor", "vpsubb", "vpsubw", "vpsubd", "vpsubq", "vpcmpgtb", "vpcmpgtw",
+    "vpcmpgtd", "vpcmpgtq", "vpcmpeqb", "vpcmpeqw", "vpcmpeqd", "vpcmpeqq",
+];
+
+/// An idiom of [`IDIOMS`] on one register, seen whole, as a gpr's 32 or 64 bits or a vector's: it reads nothing of the
+/// register and writes all of it, as `zero` and `ones` do, so that it may be the first to write it.
+fn idiom(op: Op, built: &mut [Arg<VReg>]) {
+    let whole = |a: &Arg<VReg>| match a.operand {
+        Operand::Reg(r, w) => (r.class == Class::Vec || matches!(w, W32 | W64)).then_some((r, w)),
+        _ => None,
+    };
+    let [first, rest @ ..] = built else { return };
+    let Some(reg) = whole(first) else { return };
+    if IDIOMS.contains(&op.name()) && !rest.is_empty() && rest.iter().all(|a| whole(a) == Some(reg)) {
+        first.access = Write;
+        for a in rest {
+            a.access = Ignored;
+        }
     }
 }
 
