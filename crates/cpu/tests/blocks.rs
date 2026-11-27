@@ -2,18 +2,17 @@
 //! when it ends one, and the launch returns once the last block has ended. What a thread that comes late does, which
 //! needs a thread kernite does not start, is in the tests of the crate's own.
 
-use std::hint::spin_loop;
 use std::sync::atomic::{
-    AtomicU8, AtomicU64,
-    Ordering::{AcqRel, Acquire, Relaxed},
+    AtomicBool, AtomicU8, AtomicU64,
+    Ordering::{AcqRel, Acquire, Relaxed, Release},
 };
-use std::sync::{Arc, Barrier, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Barrier, Mutex, PoisonError, mpsc};
 use std::{fs, panic, thread};
 
 use kernite_cpu::{Grid, cpus, launch, launch_blocks, most};
 
-type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
+mod waits;
+use waits::{HANG, Result, asleep, me, until};
 
 /// The kernel runs once for each block, and for no other: 0, 1, 7, a thousand and a million blocks, on 1, 2, 6 and 12
 /// threads, which the system places and which the caller does. A grid of more threads than the process runs at once is
@@ -78,68 +77,63 @@ fn a_grid_that_launch_refuses_launch_blocks_refuses_in_the_same_words() -> Resul
     let too_many = launch_blocks(Grid::new(1), most_blocks + 1, |_| {}).err().ok_or("launch_blocks gave Ok")?;
     assert_eq!(too_many.message, "a launch has 9223372036854775807 blocks at most, and this has 9223372036854775808");
     // The most blocks a launch has ends when a block panics: the blocks left count as ended, with no count to overflow.
-    let launched = panic::catch_unwind(|| {
-        launch_blocks(Grid::new(most.min(3)), most_blocks, |block| {
-            if block == 3 {
-                panic::resume_unwind(Box::new("block 3 panics"));
-            }
-        })
+    // A launch that ran them would not end, so it runs on a thread of its own, which the test waits for until a hang.
+    let (said, heard) = mpsc::channel();
+    thread::spawn(move || {
+        let launched = panic::catch_unwind(|| {
+            launch_blocks(Grid::new(most.min(3)), most_blocks, |block| {
+                if block == 3 {
+                    panic::resume_unwind(Box::new("block 3 panics"));
+                }
+            })
+        });
+        _ = said.send(launched.err().map(|payload| payload.downcast_ref::<&str>().copied()));
     });
-    let payload = launched.err().ok_or("launched gave Ok")?;
-    assert_eq!(payload.downcast_ref::<&str>(), Some(&"block 3 panics"));
+    let payload =
+        heard.recv_timeout(HANG).map_err(|_| format!("a launch of the most blocks: not in {HANG:?}, a hang"))?;
+    assert_eq!(payload, Some(Some("block 3 panics")), "how a launch of the most blocks, one of which panics, ended");
     Ok(())
 }
 
 /// A block that panics ends the launch, once every block taken has ended, as a panic in the caller with the payload it
-/// was given. No block is taken after it: blocks that last 20 ms on 6 threads, of a thousand, begin a few after block
-/// 10, which panics, and no more, though the launch had 3 s of them left. The first panic is the one the caller gets:
-/// block 10 waits for block 11 to have begun, and panics; block 11 waits for it, and for 50 ms more, and panics too.
-/// The launches after run each block and each thread once.
+/// was given, the first if more than one panicked; and no block is taken after it. On two threads, of a thousand
+/// blocks, the first two each wait for the other to begin, so that each thread has one. The caller's panics. The
+/// other's waits until the caller sleeps, which has no block left that it may take, and then panics too. The launch
+/// ends then, with the caller's panic, and those two are the only blocks that began. The launches after run each block
+/// and each thread once.
 #[test]
 fn a_block_that_panics_ends_the_launch_in_the_caller_once_every_block_taken_has_ended() -> Result {
-    let threads = most()?.min(6);
-    if threads < 2 {
+    if most()? < 2 {
         eprintln!("the process runs one thread at once: skipped");
         return Ok(());
     }
-    let (begun, done) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
-    let (ten_panicked, eleven_began) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
-    let (began, ended) = (Arc::clone(&begun), Arc::clone(&done));
+    let (caller, id) = (Arc::new(me()?), thread::current().id());
+    let (begun, other) = (Arc::new(AtomicU64::new(0)), Arc::new(Mutex::new(None)));
+    let (began, into) = (Arc::clone(&begun), Arc::clone(&other));
     let launched = panic::catch_unwind(move || {
-        launch_blocks(Grid::new(threads), 1000, move |block| {
-            began.fetch_add(1, Relaxed);
+        launch_blocks(Grid::new(2), 1000, move |_| {
+            if began.fetch_add(1, AcqRel) >= 2 {
+                return;
+            }
+            let both = until("the other block begun", || Ok(began.load(Acquire) >= 2));
             // `resume_unwind` panics without the message a hook would print.
-            if block == 10 {
-                while eleven_began.load(Relaxed) == 0 {
-                    thread::yield_now();
-                }
-                ten_panicked.store(1, Relaxed);
-                panic::resume_unwind(Box::new("block 10 panics"));
+            if thread::current().id() == id {
+                panic::resume_unwind(Box::new("the caller's block panics"));
             }
-            if block == 11 {
-                eleven_began.store(1, Relaxed);
-                while ten_panicked.load(Relaxed) == 0 {
-                    thread::yield_now();
-                }
-                thread::sleep(Duration::from_millis(50));
-                panic::resume_unwind(Box::new("block 11 panics"));
-            }
-            thread::sleep(Duration::from_millis(20));
-            ended.fetch_add(1, Relaxed);
+            let slept = both.and_then(|()| until("the caller asleep", || asleep(&caller)));
+            *into.lock().unwrap_or_else(PoisonError::into_inner) = Some(slept.map_err(|e| e.to_string()));
+            panic::resume_unwind(Box::new("the other block panics"));
         })
     });
     let payload = launched.err().ok_or("launched gave Ok")?;
-    assert_eq!(payload.downcast_ref::<&str>(), Some(&"block 10 panics"));
-    // Each block that began ended, but the two that panicked, which did not count themselves.
-    let (begun_now, done_now) = (begun.load(Relaxed), done.load(Relaxed));
-    assert_eq!(begun_now, done_now + 2, "blocks that began, and blocks that ended");
-    assert!(begun_now < 100, "{begun_now} of 1000 blocks began, after block 10 panicked");
-    thread::sleep(Duration::from_millis(100));
-    assert_eq!(begun.load(Relaxed), begun_now, "a block began after the launch had ended");
+    assert_eq!(payload.downcast_ref::<&str>(), Some(&"the caller's block panics"));
+    let other = other.lock().unwrap_or_else(PoisonError::into_inner).take();
+    assert_eq!(other, Some(Ok(())), "the other block waited for the caller to sleep, and ended before the launch did");
+    assert_eq!(begun.load(Acquire), 2, "blocks that began, of a launch whose first two panicked");
     // The threads run the next launches as before.
     let blocks = Arc::new(Mutex::new(vec![]));
     let into = Arc::clone(&blocks);
-    launch_blocks(Grid::new(threads), 100, move |block| {
+    launch_blocks(Grid::new(2), 100, move |block| {
         into.lock().unwrap_or_else(PoisonError::into_inner).push(block);
     })?;
     let mut blocks = blocks.lock().unwrap_or_else(PoisonError::into_inner).clone();
@@ -147,10 +141,10 @@ fn a_block_that_panics_ends_the_launch_in_the_caller_once_every_block_taken_has_
     assert_eq!(blocks, (0..100).collect::<Vec<u64>>());
     let ran = Arc::new(Mutex::new(vec![]));
     let into = Arc::clone(&ran);
-    launch(Grid::new(threads), move |place| into.lock().unwrap_or_else(PoisonError::into_inner).push(place.thread()))?;
+    launch(Grid::new(2), move |place| into.lock().unwrap_or_else(PoisonError::into_inner).push(place.thread()))?;
     let mut ran = ran.lock().unwrap_or_else(PoisonError::into_inner).clone();
     ran.sort();
-    assert_eq!(ran, (0..threads as u64).collect::<Vec<_>>());
+    assert_eq!(ran, [0, 1]);
     Ok(())
 }
 
@@ -181,8 +175,7 @@ fn launches_of_blocks_from_two_threads_at_once_run_at_once_each_on_threads_of_it
 /// A launch of blocks and a launch of threads each can follow the other, on the same kept threads: the second runs on
 /// every thread, each once, when the first has left some of them late or not woken, as a launch of 2 blocks wakes one
 /// thread of 3. Its threads wait for each other, as `grid.sync()` makes them, and each sees all of them come: one that
-/// was still in the first launch, or had a reply of it left, would not. They take 20 ms more, so that a launch which
-/// returned when a thread of the first said it had ended would return before them.
+/// was still in the first launch would not.
 #[test]
 fn a_launch_of_threads_follows_a_launch_of_blocks_on_the_same_threads_and_the_reverse() -> Result {
     let threads = most()?.min(3);
@@ -193,12 +186,7 @@ fn a_launch_of_threads_follows_a_launch_of_blocks_on_the_same_threads_and_the_re
         let (into, arrived) = (Arc::clone(&ran), Arc::new(AtomicU64::new(0)));
         launch(grid, move |place| {
             arrived.fetch_add(1, AcqRel);
-            let give_up = Instant::now() + Duration::from_secs(10);
-            while arrived.load(Acquire) < threads && Instant::now() < give_up {
-                spin_loop();
-            }
-            let all_came = arrived.load(Acquire) == threads;
-            thread::sleep(Duration::from_millis(20));
+            let all_came = until("all the threads come", || Ok(arrived.load(Acquire) >= threads)).is_ok();
             into.lock().unwrap_or_else(PoisonError::into_inner).push((place.thread(), all_came));
         })?;
         let mut ran = ran.lock().unwrap_or_else(PoisonError::into_inner);
@@ -241,7 +229,8 @@ fn allowed() -> Result<String> {
 }
 
 /// A launch of blocks of a placed grid puts its threads as a launch does: each on its CPU alone, and the caller's
-/// thread on the first, where it stays. Blocks that last 5 ms, sixty of them, are taken by each of the three threads.
+/// thread on the first, where it stays. Three blocks each wait at a barrier for the others, so that each of the three
+/// threads takes one.
 #[test]
 fn a_launch_of_blocks_of_a_placed_grid_puts_its_threads_on_their_cpus() -> Result {
     if !std::path::Path::new("/proc/thread-self/status").exists() {
@@ -253,10 +242,11 @@ fn a_launch_of_blocks_of_a_placed_grid_puts_its_threads_on_their_cpus() -> Resul
         eprintln!("the process runs fewer than 3 threads at once: skipped");
         return Ok(());
     };
-    let (where_blocks_ran, caller) = (Arc::new(Mutex::new(vec![])), thread::current().id());
+    let (where_blocks_ran, caller, meet) =
+        (Arc::new(Mutex::new(vec![])), thread::current().id(), Arc::new(Barrier::new(3)));
     let into = Arc::clone(&where_blocks_ran);
-    launch_blocks(Grid::on(placed), 60, move |_| {
-        thread::sleep(Duration::from_millis(5));
+    launch_blocks(Grid::on(placed), 3, move |_| {
+        meet.wait();
         let at = allowed().map(|cpus| (thread::current().id() == caller, cpus));
         into.lock().unwrap_or_else(PoisonError::into_inner).push(at);
     })?;
@@ -270,60 +260,60 @@ fn a_launch_of_blocks_of_a_placed_grid_puts_its_threads_on_their_cpus() -> Resul
     }
     seen.sort();
     seen.dedup();
-    assert_eq!(seen.len(), 3, "the blocks ran on the CPUs {seen:?}, where each of 3 threads took some");
+    assert_eq!(seen.len(), 3, "the blocks ran on the CPUs {seen:?}, where each of 3 threads took one");
     assert_eq!(allowed()?, placed[0].to_string(), "the caller's thread is on the first CPU of the grid");
     Ok(())
 }
 
 /// A block that waits for a block taken later waits for ever, if every thread is in one: a grid of one thread takes
-/// block 1 after block 0 has ended, so that block 0, which waits for it to begin, sees it begin never. The test lets it
-/// wait for 200 ms, and no longer.
+/// block 1 only once block 0 has ended. Block 0 looks for block 1 a thousand times, and never sees it begin, and block
+/// 1 sees block 0 ended: block 0, had it waited for block 1, would have waited for ever.
 #[test]
 fn a_block_that_waits_for_a_block_taken_later_waits_for_ever_if_every_thread_is_in_one() -> Result {
-    let (began, waited, saw) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
-    let (one_began, zero_waited, zero_saw) = (Arc::clone(&began), Arc::clone(&waited), Arc::clone(&saw));
+    let (one_began, zero_ended) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+    let saw: Arc<Mutex<Vec<(&str, bool)>>> = Arc::default();
+    let into = Arc::clone(&saw);
     launch_blocks(Grid::new(1), 2, move |block| {
+        let saw = |what, seen| into.lock().unwrap_or_else(PoisonError::into_inner).push((what, seen));
         if block == 1 {
-            one_began.store(1, Relaxed);
+            one_began.store(true, Release);
+            saw("block 1 saw block 0 ended", zero_ended.load(Acquire));
             return;
         }
-        let start = Instant::now();
-        while one_began.load(Relaxed) == 0 && start.elapsed() < Duration::from_millis(200) {
+        let seen = (0..1000).fold(false, |seen, _| {
             thread::yield_now();
-        }
-        zero_waited.store(u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX), Relaxed);
-        zero_saw.store(one_began.load(Relaxed), Relaxed);
+            seen || one_began.load(Acquire)
+        });
+        saw("block 0 saw block 1 begin", seen);
+        zero_ended.store(true, Release);
     })?;
-    assert!(waited.load(Relaxed) >= 200, "block 0 waited {} ms, and not the 200 it was to", waited.load(Relaxed));
-    assert_eq!(saw.load(Relaxed), 0, "block 0 saw block 1 begin, though the only thread was in block 0");
-    assert_eq!(began.load(Relaxed), 1, "block 1 did not run");
+    let saw = std::mem::take(&mut *saw.lock().unwrap_or_else(PoisonError::into_inner));
+    assert_eq!(saw, [("block 0 saw block 1 begin", false), ("block 1 saw block 0 ended", true)]);
     Ok(())
 }
 
 /// A launch of blocks returns once its last block has ended, and not before, whichever thread runs it. Two blocks each
-/// wait for the other to begin, so that each runs on a thread of its own, and the one that the caller does not run
-/// lasts 100 ms: the caller has no block left, and waits asleep for it. The launch takes that long, and no longer by
-/// much.
+/// wait for the other to begin, so that each runs on a thread of its own. The one that the caller does not run ends
+/// once the caller sleeps, which has no block left and waits for it, and says so: a launch that returned before its
+/// last block ended would find it not ended, as its caller would not sleep in it.
 #[test]
 fn the_launch_returns_once_the_last_block_has_ended() -> Result {
     if most()? < 2 {
         eprintln!("the process runs one thread at once: skipped");
         return Ok(());
     }
-    let (begun, caller) = (Arc::new(AtomicU64::new(0)), thread::current().id());
-    let began = Instant::now();
+    let (caller, id) = (Arc::new(me()?), thread::current().id());
+    let (begun, ended) = (Arc::new(AtomicU64::new(0)), Arc::new(Mutex::new(None)));
+    let into = Arc::clone(&ended);
     launch_blocks(Grid::new(2), 2, move |_| {
         begun.fetch_add(1, AcqRel);
-        let give_up = Instant::now() + Duration::from_secs(10);
-        while begun.load(Acquire) < 2 && Instant::now() < give_up {
-            thread::yield_now();
-        }
-        if thread::current().id() != caller {
-            thread::sleep(Duration::from_millis(100));
+        let both = until("the other block begun", || Ok(begun.load(Acquire) >= 2));
+        if thread::current().id() != id {
+            let slept = both.and_then(|()| until("the caller asleep", || asleep(&caller)));
+            *into.lock().unwrap_or_else(PoisonError::into_inner) = Some(slept.map_err(|e| e.to_string()));
         }
     })?;
-    let took = began.elapsed();
-    assert!(took >= Duration::from_millis(100), "the launch took {took:?}, less than its longest block");
-    assert!(took < Duration::from_millis(500), "the launch took {took:?}, where its longest block took 100 ms");
+    let ended = ended.lock().unwrap_or_else(PoisonError::into_inner).take();
+    assert_eq!(ended, Some(Ok(())), "the block the caller did not run, when the launch returned");
     Ok(())
 }

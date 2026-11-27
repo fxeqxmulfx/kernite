@@ -1,74 +1,56 @@
-//! How long the threads of a grid wait spinning, and what a launch that moves threads does to the
-//! spin of the kept threads. A thread waits spinning for as long as its grid says, [`SPIN`] if the
-//! grid says none: a kept thread for the next launch, and the caller for each of the others to end.
+//! How long the threads of a grid wait spinning, and what a launch that moves threads does to the spin of the kept
+//! threads. A thread waits spinning for as long as its grid says, `kernite_cpu::SPIN` if the grid says none, and then
+//! sleeps: a kept thread for the next launch, and the caller for each of the others to end.
 //!
-//! A thread that may run on one CPU alone cannot run while another spins there, and a kept thread
-//! spins after its launch, so a launch that moves a thread onto the CPU of a kept thread would
-//! wait for the spin to end. It ends the spin of each kept thread on a CPU a thread moves to, and
-//! of each the system places, which may spin on any, before anything moves, and the spin of no
-//! other: a launch that moves none ends none.
+//! A thread that may run on one CPU alone cannot run while another spins there, and a kept thread spins after its
+//! launch, so a launch that moves a thread onto the CPU of a kept thread would wait for the spin to end. It ends the
+//! spin of each kept thread on a CPU a thread moves to, and of each the system places, which may spin on any, and the
+//! spin of no other: a launch that moves none ends none.
 //!
-//! No test here times a launch, for other work on the machine slows a launch by as much as the spin
-//! it looks for. A test counts, as Linux does. Each thread of a launch counts itself as its kernel
-//! starts: for how long it has used a CPU, how many times it has stopped to wait, and how many
-//! times another thread has taken its CPU, all as of the last time it stopped running. The counts
-//! of two launches that use a thread, one after the other, say what it did between them. A thread
-//! told to stop spinning stops to wait after a few microseconds of CPU, with no thread taking its
-//! CPU. One that is not told spins until its spin runs out, which uses as much CPU as the spin lasts, or until
-//! another thread takes its CPU, and does not stop to wait before. Other work on the machine delays
-//! threads, and so changes how long one spins before a launch tells it, but it never makes a thread
-//! stop to wait early, nor spin on after it is told. A test of a thread that must be told needs one
-//! round of many in which no thread was delayed; a test of one that must not is sure of it whatever
-//! the machine does.
+//! No test here holds how long a thing takes, which other work on the machine stretches: a probe run alone measures
+//! it. A test holds what Linux says of a thread. One whose spin is nothing, or has run out, or a launch has ended,
+//! sleeps, and a test waits for that as long as it takes. One whose spin is without end runs for as long as it waits:
+//! a test waits until Linux has counted it running for twice `SPIN` since a launch, longer than a spin of `SPIN` lasts,
+//! and sees it awake then. However busy the machine is, that wait ends for a thread that spins, and never for one that
+//! sleeps after `SPIN`, which the test says once it has waited `HANG`.
 
-use std::fs::{self, File};
-use std::hint::spin_loop;
-use std::io;
-use std::os::unix::fs::FileExt;
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use std::sync::{Arc, Barrier, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::slice;
+use std::sync::atomic::{
+    AtomicBool, AtomicUsize,
+    Ordering::{AcqRel, Acquire, Release},
+};
+use std::sync::{Arc, Barrier, Mutex, MutexGuard, PoisonError, mpsc};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use kernite_cpu::{Grid, SPIN, cpus, launch, launch_blocks, most};
 
-type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
-
-/// How many rounds a test makes at most to see a thread told to stop spinning. Many rounds show it
-/// on a quiet machine, and one in a few hundred beside busy work on every CPU, where a launch
-/// takes milliseconds; a test ends at the first that does.
-const TRIES: usize = 5000;
-
-/// How many rounds a test makes to see that no thread is told to stop spinning.
-const ROUNDS: usize = 300;
+mod waits;
+use waits::{HANG, Result, asleep, me, until};
 
 /// How many threads a grid of these tests has.
 const THREADS: usize = 3;
 
-/// A spin that no test waits out: a launch goes on long before such a spin would end, so a test that is not done in
-/// a fraction of it has waited for something else.
-const LONG: Duration = Duration::from_secs(10);
+/// A spin that never runs out: only the next launch ends it, or a launch that moves a thread onto its CPU, or the end
+/// of its caller.
+const WITHOUT_END: Duration = Duration::MAX;
 
-/// How long a test lets a thread sleep between two launches, for a thread whose spin has run out to
-/// have gone to sleep.
-const GAP: Duration = Duration::from_millis(2);
+/// How many launches a test makes of threads that must spin after each.
+const ROUNDS: usize = 10;
 
-/// How much CPU a kept thread may use between two launches beyond its spin: the system adds some
-/// microseconds, to wake it, to run its kernel and to count it. Four spins of `SPIN` are room to spare.
-const SLACK: Duration = Duration::from_micros(800);
-
-/// The tests place threads on the same CPUs, and a thread that spins on one keeps another from
-/// running there, so they run one at a time.
+/// The tests spin threads on the same CPUs, where each test's would share them with the others', so they run one at a
+/// time: no result depends on it, but each test takes only what its own launches take.
 fn alone() -> MutexGuard<'static, ()> {
     static ONE: Mutex<()> = Mutex::new(());
     ONE.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The first four CPUs the caller's thread may run on, one more than a grid has threads, if the
-/// process runs that many threads at once; none if not.
-fn four() -> Result<Option<Vec<usize>>> {
-    let all = cpus()?;
-    let four = all.get(..THREADS + 1);
+/// The first four CPUs the caller's thread may run on, one more than a grid has threads, if the process runs that many
+/// threads at once; none if not.
+fn four() -> Result<Option<[usize; THREADS + 1]>> {
+    let four = cpus()?.first_chunk().copied();
     if four.is_none() || most()? < THREADS {
         eprintln!(
             "the caller's thread may run on fewer than four CPUs, or the process runs fewer than three threads at \
@@ -76,565 +58,333 @@ fn four() -> Result<Option<Vec<usize>>> {
         );
         return Ok(None);
     }
-    Ok(four.map(<[usize]>::to_vec))
+    Ok(four)
 }
 
-/// The text in the first `size` bytes of `buffer`, which a read filled.
-fn text(buffer: &[u8], size: usize) -> Result<&str> {
-    Ok(str::from_utf8(buffer.get(..size).ok_or("a read gave more bytes than the buffer has")?)?)
+/// The name of the thread whose directory in `/proc` is `task`: `grid thread 2`.
+fn name(task: &Path) -> String {
+    fs::read_to_string(task.join("comm")).map_or_else(|e| e.to_string(), |name| name.trim_end().to_string())
 }
 
-/// What Linux has counted of a thread, as of the last time it stopped running.
-#[derive(Clone, Copy)]
-struct Count {
-    /// For how long the thread has used a CPU.
-    cpu: Duration,
-    /// How many times it has stopped to wait.
-    stopped: u64,
-    /// How many times another thread has taken its CPU.
-    displaced: u64,
+/// How long the thread whose directory in `/proc` is `task` has run on a CPU, as Linux has counted it: it counts the
+/// time of a thread that runs at each tick of its clock, a millisecond apart here.
+fn ran(task: &Path) -> Result<Duration> {
+    let schedstat = fs::read_to_string(task.join("schedstat"))?;
+    let nanos = schedstat.split_whitespace().next().ok_or("next gave None")?.parse()?;
+    Ok(Duration::from_nanos(nanos))
 }
 
-impl Count {
-    /// The count of the thread that the open files `status` and `schedstat` in `/proc` are of. The
-    /// thread reads `status` last, with its buffers made, and asks nothing of the system after:
-    /// a call that stopped the thread to wait would be counted by the next count, as if a launch
-    /// had told it to stop.
-    fn of(status: &File, schedstat: &File) -> Result<Count> {
-        let (mut times, mut switches) = ([0; 256], [0; 8192]);
-        let (times_size, switches_size) = (schedstat.read_at(&mut times, 0)?, status.read_at(&mut switches, 0)?);
-        let (times, switches) = (text(&times, times_size)?, text(&switches, switches_size)?);
-        let field = |name: &str| -> Result<u64> {
-            let line = switches.lines().find_map(|line| line.strip_prefix(name)?.strip_prefix(':'));
-            Ok(line.ok_or("find_map gave None")?.trim().parse()?)
-        };
-        Ok(Count {
-            cpu: Duration::from_nanos(times.split_whitespace().next().ok_or("next gave None")?.parse()?),
-            stopped: field("voluntary_ctxt_switches")?,
-            displaced: field("nonvoluntary_ctxt_switches")?,
-        })
-    }
-
-    /// What the thread did between `before` and this count.
-    fn since(&self, before: &Count) -> Since {
-        Since {
-            cpu: self.cpu.saturating_sub(before.cpu),
-            stopped: self.stopped.saturating_sub(before.stopped),
-            displaced: self.displaced.saturating_sub(before.displaced),
-        }
-    }
-}
-
-/// What a thread did between two counts.
-#[derive(Clone, Copy)]
-struct Since {
-    /// How much CPU it used.
-    cpu: Duration,
-    /// How many times it stopped to wait.
-    stopped: u64,
-    /// How many times another thread took its CPU.
-    displaced: u64,
-}
-
-impl Since {
-    /// Whether the thread was told to stop spinning: it stopped to wait after less than half of `SPIN` of CPU, and no
-    /// thread took its CPU. A thread whose spin runs out has used `SPIN` of CPU when it stops, or has had its CPU
-    /// taken.
-    fn told(&self) -> bool {
-        self.stopped > 0 && self.displaced == 0 && self.cpu < SPIN / 2
-    }
-
-    /// Whether the thread spun for `spin`, as far as CPU says, and then stopped to wait, with no thread taking its CPU:
-    /// it used half of `spin` of CPU at least. Other work on the machine gives a thread less CPU than its spin, never
-    /// more.
-    fn spun(&self, spin: Duration) -> bool {
-        self.stopped > 0 && self.displaced == 0 && self.cpu >= spin / 2
-    }
-}
-
-/// The files in `/proc` of a thread, `status` and `schedstat`, as it opened them.
-type Files = io::Result<(File, File)>;
-
-/// Launches that count the threads they run. A count is as of the last time the thread stopped
-/// running, so the CPU a thread used between two counts is that of all the time it was awake: short
-/// when a launch tells it to stop soon after it wakes, as the launches of a test do, one after the
-/// other.
-#[derive(Default)]
-struct Counter {
-    /// The files in `/proc` of each thread. A thread opens its own in the first launch it runs in,
-    /// and reads them again in the ones after, which costs less than opening.
-    files: Arc<[OnceLock<Files>; THREADS]>,
-    /// The count of each thread at the last launch that used it.
-    last: [Option<Count>; THREADS],
-}
-
-impl Counter {
-    /// Launches `grid`, and says, by thread, which of its kept threads were told to stop spinning
-    /// since the last launch that used them. The caller's thread, the first, is never one.
-    fn launch(&mut self, grid: Grid<'_>) -> Result<[bool; THREADS]> {
-        Ok(self.since(grid)?.map(|since| since.is_some_and(|since| since.told())))
-    }
-
-    /// Launches `grid`, and says, by thread, what each of its kept threads did since the last launch that used it: none
-    /// for the caller's thread, the first, for a thread that has not run a launch before, and for one the grid does not
-    /// use.
-    fn since(&mut self, grid: Grid<'_>) -> Result<[Option<Since>; THREADS]> {
-        let (files, counts) = (Arc::clone(&self.files), Arc::<[OnceLock<Result<Count>>; THREADS]>::default());
-        let into = Arc::clone(&counts);
-        launch(grid, move |place| {
-            let t = place.thread() as usize;
-            let (Some(files), Some(into)) = (files.get(t), into.get(t)) else { return };
-            // `/proc/thread-self` is the thread that opens it.
-            let opened = files.get_or_init(|| {
-                Ok((File::open("/proc/thread-self/status")?, File::open("/proc/thread-self/schedstat")?))
-            });
-            let _ = into.set(match opened {
-                Ok((status, schedstat)) => Count::of(status, schedstat),
-                Err(e) => Err(e.to_string().into()),
-            });
+/// Waits until Linux has counted each thread of `tasks` running for twice `SPIN` since the call, and says whether one
+/// sleeps then. The first count after the call may hold time from before it too, so the wait counts from that one.
+fn spun(what: &str, tasks: &[PathBuf]) -> Result {
+    let counted = tasks.iter().map(|task| ran(task)).collect::<Result<Vec<_>>>()?;
+    for (task, counted) in tasks.iter().zip(counted) {
+        let mut from = None;
+        until(&format!("{what}: {} running for {:?}", name(task), 2 * SPIN), || {
+            let now = ran(task)?;
+            match from {
+                Some(from) => return Ok(now >= from + 2 * SPIN),
+                None if now != counted => from = Some(now),
+                None => {}
+            }
+            Ok(false)
         })?;
-        let mut since = [None; THREADS];
-        for ((count, last), slot) in counts.iter().zip(&mut self.last).zip(&mut since).skip(1) {
-            if let Some(count) = count.get() {
-                let count = *count.as_ref().map_err(|e| e.to_string())?;
-                *slot = last.replace(count).map(|before| count.since(&before));
-            }
-        }
-        Ok(since)
-    }
-}
-
-/// A launch that moves a thread onto the CPU of a kept thread that spins ends that thread's spin
-/// before it moves anything, so it does not wait for the spin: in some round, the thread stops to
-/// wait after a few microseconds of CPU, and no thread has taken its CPU. A launch that waited for
-/// the spin would find the thread used `SPIN` of CPU, or its CPU taken, and one that ended the spin
-/// after it moved would be too late. A round is two launches: three threads on the first three
-/// CPUs, kept; and the second, which moves a thread onto the CPU of one, and not as its own place:
-///
-/// - the caller's thread goes where a kept thread the second launch does not use spins;
-/// - the caller's thread goes where a kept thread the second launch uses spins, and that thread
-///   goes where the caller's was;
-/// - a kept thread goes where another that the launch does not use spins.
-///
-/// The first launch of the next round puts them back, and counts the thread the second does not
-/// use.
-#[test]
-fn a_launch_that_moves_a_thread_onto_the_cpu_of_a_kept_thread_ends_its_spin_before_it_moves() -> Result {
-    let _alone = alone();
-    let Some(on) = four()? else { return Ok(()) };
-    let first = Grid::on(&on[..THREADS]);
-    let (caller_to_unused, caller_to_used, kept_to_unused) = ([on[2], on[1]], [on[1], on[0]], [on[0], on[2]]);
-    // The second launch, and the kept thread in the way.
-    let cases = [
-        ("the caller's thread goes where a thread the launch does not use spins", Grid::on(&caller_to_unused), 2),
-        ("the caller's thread goes where a thread the launch uses spins", Grid::on(&caller_to_used), 1),
-        ("a kept thread goes where a thread the launch does not use spins", Grid::on(&kept_to_unused), 2),
-    ];
-    for (what, second, in_the_way) in cases {
-        let mut counter = Counter::default();
-        let mut ended = false;
-        for _ in 0..TRIES {
-            let (told_first, told_second) = (counter.launch(first)?, counter.launch(second)?);
-            ended = told_first[in_the_way] || told_second[in_the_way];
-            if ended {
-                break;
-            }
-        }
-        let message = "rounds found the kept thread in the way stop to wait early, with no thread taking its CPU";
-        assert!(ended, "{what}: none of {TRIES} {message}");
-    }
-    Ok(())
-}
-
-/// A launch ends the spin of no kept thread that no thread moves onto the CPU of: not when it
-/// moves none, and not when the CPU a thread moves to is free. A round is two launches: three
-/// threads on the first three CPUs; and a second that uses the first kept thread and not the
-/// second. In no round is either kept thread told to stop spinning, by either launch.
-#[test]
-fn a_launch_ends_the_spin_of_no_kept_thread_that_no_thread_moves_onto_the_cpu_of() -> Result {
-    let _alone = alone();
-    let Some(on) = four()? else { return Ok(()) };
-    let first = Grid::on(&on[..THREADS]);
-    let (none_moves, to_a_free_cpu) = ([on[0], on[1]], [on[3], on[1]]);
-    let cases = [
-        ("no thread moves", Grid::on(&none_moves)),
-        ("the caller's thread goes to a CPU where none spins", Grid::on(&to_a_free_cpu)),
-    ];
-    for (what, second) in cases {
-        let mut counter = Counter::default();
-        let mut rounds_told = 0;
-        for _ in 0..ROUNDS {
-            let (told_first, told_second) = (counter.launch(first)?, counter.launch(second)?);
-            rounds_told += usize::from(told_first.iter().chain(&told_second).any(|&told| told));
-        }
-        let message = "rounds found a kept thread told to stop spinning, where no thread moved onto its CPU";
-        assert_eq!(rounds_told, 0, "{what}: {rounds_told} of {ROUNDS} {message}");
-    }
-    Ok(())
-}
-
-/// A launch that moves a thread ends the spin of the kept threads the system places, which may
-/// spin on any CPU: in some round, each stops to wait after a few microseconds of CPU, and no
-/// thread has taken its CPU. A round is a launch of three threads that the system places, and
-/// a launch that moves the caller's thread.
-#[test]
-fn a_launch_that_moves_a_thread_ends_the_spin_of_the_kept_threads_the_system_places() -> Result {
-    let _alone = alone();
-    let Some(on) = four()? else { return Ok(()) };
-    let (anywhere, here) = (Grid::new(THREADS), Grid::on(&on[..1]));
-    let mut counter = Counter::default();
-    let mut ended = [false; 2];
-    for _ in 0..TRIES {
-        let told = counter.launch(anywhere)?;
-        counter.launch(here)?;
-        ended = [ended[0] || told[1], ended[1] || told[2]];
-        if ended == [true; 2] {
-            break;
-        }
-    }
-    let message = "stopped to wait early, with no thread taking its CPU, in some of";
-    assert_eq!(ended, [true; 2], "kept threads the system places did not all stop: {ended:?} {message} {TRIES} rounds");
-    Ok(())
-}
-
-/// A kept thread whose spin a launch ended spins again after the next launch that uses it. A round
-/// is three launches: the second moves the caller's thread onto the CPU of the third thread, which
-/// it does not use, and ends its spin; and the first launch twice, which puts the caller back, and
-/// uses the third thread each time. In some round, the thread stops to wait early between the
-/// launch before the round and the first of the two. In no round does it stop to wait early
-/// between the two: a thread that is told to stop spinning stays told until a launch uses it, and a
-/// launch that does not clear that leaves the thread to sleep at once, where it was to spin.
-#[test]
-fn a_kept_thread_whose_spin_a_launch_ended_spins_again_after_the_next_launch_that_uses_it() -> Result {
-    let _alone = alone();
-    let Some(on) = four()? else { return Ok(()) };
-    let (first, caller_to_third) = (Grid::on(&on[..THREADS]), [on[2], on[1]]);
-    let second = Grid::on(&caller_to_third);
-    let mut counter = Counter::default();
-    let (mut ended, mut asleep_again, mut rounds) = (false, 0, 0);
-    while rounds < ROUNDS || (!ended && rounds < TRIES) {
-        counter.launch(second)?;
-        // The third thread, at index 2.
-        ended |= counter.launch(first)?[2];
-        asleep_again += usize::from(counter.launch(first)?[2]);
-        rounds += 1;
-    }
-    let message = "rounds found the thread stop to wait early after a launch that used it";
-    assert!(ended, "none of {rounds} rounds found the thread the second launch left stop to wait early");
-    assert_eq!(asleep_again, 0, "{asleep_again} of {rounds} {message}");
-    Ok(())
-}
-
-/// A launch that ends the spin of a kept thread, and uses it, leaves it spinning after: the spin it ends is the one
-/// that was to last after the launch before, and the launch's own grid says how long the thread spins after it. A round
-/// is three launches: the first puts the grid's three threads on the first three CPUs, the caller's on the first, and
-/// the second swaps the caller's thread and the first kept thread, which ends the spin of the kept thread and uses it;
-/// and the third, which is the second again, moves none, and finds the thread where it spun. In no round does the kept
-/// thread stop to wait early between the second and the third: a thread that the launch that uses it told to stop would
-/// sleep at once.
-#[test]
-fn a_launch_that_ends_the_spin_of_a_kept_thread_and_uses_it_leaves_it_spinning_after() -> Result {
-    let _alone = alone();
-    let Some(on) = four()? else { return Ok(()) };
-    let (first, swapped) = (Grid::on(&on[..THREADS]), [on[1], on[0]]);
-    let second = Grid::on(&swapped);
-    let mut counter = Counter::default();
-    let mut asleep_at_once = 0;
-    for _ in 0..ROUNDS {
-        counter.launch(first)?;
-        counter.launch(second)?;
-        // The first kept thread, at index 1.
-        asleep_at_once += usize::from(counter.launch(second)?[1]);
-    }
-    let message = "rounds found the kept thread stop to wait early after the launch that ended its spin and used it";
-    assert_eq!(asleep_at_once, 0, "{asleep_at_once} of {ROUNDS} {message}");
-    Ok(())
-}
-
-/// For how long the kept thread whose directory in `/proc/self/task` is `task` has used a CPU, as Linux counts it.
-fn used(task: &str) -> Result<Duration> {
-    let schedstat = fs::read_to_string(format!("/proc/self/task/{task}/schedstat"))?;
-    Ok(Duration::from_nanos(schedstat.split_whitespace().next().ok_or("next gave None")?.parse()?))
-}
-
-/// A kept thread that comes late to a launch of blocks rests as a launch that moves a thread onto its CPU says, as it
-/// does when it comes to a launch of threads on time: a launch that moves a thread first ends the spin of each kept
-/// thread on the CPU it moves to, however long the spin was to last, and a thread that was handed the launch before
-/// takes it after, and spins no more for it. A round is three launches:
-///
-/// - one whose grid says no spin, after which every kept thread sleeps;
-/// - a launch of three blocks, or of three threads, of a grid whose spin is long, which the kept threads, asleep, come
-///   to some microseconds after the caller has ended it, if it is of blocks;
-/// - a launch that moves the first kept thread onto the CPU of the second, which it does not use.
-///
-/// In no round does the second kept thread use half of the 30 ms after the third launch, which a thread that spins on
-/// uses all of.
-#[test]
-fn a_kept_thread_that_comes_late_to_a_launch_of_blocks_rests_as_a_later_launch_says() -> Result {
-    let _alone = alone();
-    let Some(on) = four()? else { return Ok(()) };
-    let window = Duration::from_millis(30);
-    let (long, asleep) = (Duration::from_millis(100), Grid::on(&on[..THREADS]).spin(Duration::ZERO));
-    let (three, two) = (Grid::on(&on[..THREADS]).spin(long), [on[0], on[2]]);
-    for blocks in [false, true] {
-        let what = if blocks { "a launch of blocks" } else { "a launch of threads" };
-        for round in 0..8 {
-            // The directory in `/proc/self/task` of the second kept thread, which it says as it runs.
-            let task = Arc::new(OnceLock::new());
-            let into = Arc::clone(&task);
-            launch(asleep, move |place| {
-                if place.thread() == 2 {
-                    let _ =
-                        into.set(fs::read_link("/proc/thread-self").map(|link| link.to_string_lossy().into_owned()));
-                }
-            })?;
-            let task = task.get().ok_or("no thread 2 ran")?.as_ref().map_err(|e| e.to_string())?;
-            let task = task.rsplit('/').next().ok_or("rsplit gave none")?;
-            thread::sleep(10 * GAP);
-            if blocks {
-                launch_blocks(three, THREADS as u64, |_| {})?;
-            } else {
-                launch(three, |_| {})?;
-            }
-            launch(Grid::on(&two).spin(Duration::ZERO), |_| {})?;
-            let before = used(task)?;
-            thread::sleep(window);
-            let spent = used(task)? - before;
-            assert!(
-                spent < window / 2,
-                "{what}, round {round}: the kept thread whose CPU a thread moved onto used {spent:?} of CPU in the \
-                 {window:?} after the launch that moved it, as a thread that spins on does"
-            );
-            // The spin of the launch ends, for the next round to begin with the thread asleep.
-            thread::sleep(long);
+        if asleep(task)? {
+            return Err(format!("{what}: {} sleeps, where it is to spin", name(task)).into());
         }
     }
     Ok(())
 }
 
-/// A kept thread waits for the next launch spinning for as long as its grid says, and then sleeps: not at all if the
-/// spin is nothing, 50 ms if it is 50 ms, and `SPIN` if the grid says none, whether the system places its threads or
-/// the caller does. A round is `under_test`, a launch of the grid in which each thread has a part, a sleep that
-/// outlasts the spin, and a launch that counts what each kept thread did since the launch before. The launches that
-/// count spin for nothing: one that left a thread spinning would give it the time until the next round's launch to
-/// spin, as well as the spin of that launch.
-///
-/// A thread that spins uses half its spin in CPU at least, and stops to wait, in some round; in no round does it use
-/// more than its spin and some microseconds, nor is it told to stop early. A thread whose spin is nothing stops to wait
-/// after a few microseconds of CPU, with no thread taking its CPU, in some round: other work on the machine may give a
-/// thread its CPU late, which counts as taken, but never makes it stop early.
-fn kept_threads_wait_as_their_grids_say(under_test: impl Fn(Grid<'_>) -> Result) -> Result {
-    let _alone = alone();
-    let Some(on) = four()? else { return Ok(()) };
-    let on = on.first_chunk::<THREADS>().ok_or("four gave fewer CPUs than a grid has threads")?;
-    let fifty = Duration::from_millis(50);
-    for (name, grid) in [("Grid::new", Grid::new(THREADS)), ("Grid::on", Grid::on(on))] {
-        // The grid, the spin it says, and how many rounds to make: a round of 50 ms lasts some 25 times as long.
-        let cases = [
-            ("a spin of nothing", grid.spin(Duration::ZERO), Duration::ZERO, ROUNDS),
-            ("a spin of 50 ms", grid.spin(fifty), fifty, 10),
-            ("no spin said", grid, SPIN, ROUNDS),
-        ];
-        for (what, grid, spin, rounds) in cases {
-            let (mut counter, counting) = (Counter::default(), grid.spin(Duration::ZERO));
-            // The first launch starts the threads, and counts them for the first time.
-            counter.launch(counting)?;
-            let (mut told, mut spun) = (0, 0);
-            for _ in 0..rounds {
-                under_test(grid)?;
-                thread::sleep(spin + GAP);
-                for since in counter.since(counting)?.into_iter().flatten() {
-                    let used = since.cpu;
-                    assert!(
-                        used <= spin + SLACK,
-                        "{name}, {what}: a kept thread used {used:?} of CPU between launches"
-                    );
-                    told += usize::from(since.told());
-                    spun += usize::from(since.spun(spin));
-                }
-            }
-            if spin.is_zero() {
-                assert!(
-                    told > 0,
-                    "{name}, {what}: no kept thread slept at once in any of {rounds} rounds, \
-                     though its spin was nothing"
-                );
-            } else {
-                assert_eq!(told, 0, "{name}, {what}: kept threads slept at once, though the grid said to spin");
-                assert!(spun > 0, "{name}, {what}: no thread of {rounds} rounds spun for {spin:?} and then slept");
-            }
-        }
+/// Makes `ROUNDS` launches by `launches`, and after each waits until each thread of `tasks` has spun for twice `SPIN`,
+/// as `spun` says.
+fn spin_after_each(what: &str, tasks: &[PathBuf], mut launches: impl FnMut() -> Result) -> Result {
+    for round in 0..ROUNDS {
+        launches()?;
+        spun(&format!("{what}, after launch {round}"), tasks)?;
     }
     Ok(())
 }
 
-/// A kept thread waits for the next launch of threads as its grid says.
-#[test]
-fn a_kept_thread_spins_for_as_long_as_its_grid_says_and_then_sleeps() -> Result {
-    kept_threads_wait_as_their_grids_say(|grid| Ok(launch(grid, |_| {})?))
-}
-
-/// A kept thread waits after a launch of blocks as its grid says, as after a launch of threads. The launch has as many
-/// blocks as the grid has threads, each waiting at a barrier for the others: each thread takes one, and the launch ends
-/// once each has, so that no thread comes to it late, after the next launch.
-#[test]
-fn a_kept_thread_spins_after_a_launch_of_blocks_for_as_long_as_its_grid_says() -> Result {
-    kept_threads_wait_as_their_grids_say(|grid| {
-        let barrier = Arc::new(Barrier::new(THREADS));
-        Ok(launch_blocks(grid, THREADS as u64, move |_| _ = barrier.wait())?)
-    })
-}
-
-/// How long the second thread of a launch of two takes: more than the `SPIN` the caller spins for, and less than the
-/// spin a grid says.
-const LATE: Duration = Duration::from_millis(1);
-
-/// A launch of two threads whose second ends `LATE` after the caller's, and what the caller, whose files in `/proc` are
-/// `files`, did while it waited for it.
-fn waited_for_the_second(grid: Grid<'_>, files: &(File, File)) -> Result<Since> {
-    let before = Count::of(&files.0, &files.1)?;
-    launch(grid, |place| {
-        if place.thread() == 1 {
-            thread::sleep(LATE);
+/// Launches `grid`, each of whose kept threads says where it is in `/proc`: their directories, by their place in the
+/// grid, from the second.
+fn kept(grid: Grid<'_>) -> Result<Vec<PathBuf>> {
+    let tasks = Arc::new(Mutex::new(vec![]));
+    let into = Arc::clone(&tasks);
+    launch(grid, move |place| {
+        if place.thread() > 0 {
+            let task = me().map_err(|e| e.to_string());
+            into.lock().unwrap_or_else(PoisonError::into_inner).push((place.thread(), task));
         }
     })?;
-    Ok(Count::of(&files.0, &files.1)?.since(&before))
+    let mut tasks = std::mem::take(&mut *tasks.lock().unwrap_or_else(PoisonError::into_inner));
+    tasks.sort_by_key(|&(t, _)| t);
+    tasks.into_iter().map(|(_, task)| Ok(task?)).collect()
 }
 
-/// The caller waits for the others to end spinning for as long as its grid says, as a kept thread waits for the next
-/// launch. `waited` makes a launch of two threads whose other takes longer than `SPIN` and less than 5 ms, and says
-/// what the caller did while it waited. With no spin said, the caller stops to wait in every round, for its spin ends
-/// before the other thread does. With a spin of 5 ms, in some of many rounds it does not stop to wait at all: other
-/// work on the machine may keep the other thread from ending in 5 ms, but never makes the caller stop early.
-fn the_caller_waits_as_its_grid_says(waited: impl Fn(Grid<'_>, &(File, File)) -> Result<Since>) -> Result {
+/// A launch of a block for each thread of `grid`, each of which waits until all have begun: so each thread runs one,
+/// each kept thread too, which then waits for the next launch as the grid says.
+fn one_block_each(grid: Grid<'_>) -> Result {
+    let begun = Arc::new(AtomicUsize::new(0));
+    launch_blocks(grid, THREADS as u64, move |_| {
+        begun.fetch_add(1, AcqRel);
+        let all = until("all the blocks begun", || Ok(begun.load(Acquire) >= THREADS));
+        assert!(all.is_ok(), "{all:?}");
+    })?;
+    Ok(())
+}
+
+/// A grid that says no spin has its threads spin for `kernite_cpu::SPIN`, 200 microseconds, as GUIDE.md says: the grid
+/// `Grid::new` or `Grid::on` makes is the one that says that spin.
+#[test]
+fn a_grid_that_says_no_spin_has_its_threads_spin_for_200_microseconds() {
+    assert_eq!(SPIN, Duration::from_micros(200));
+    assert_eq!(Grid::new(2), Grid::new(2).spin(SPIN));
+    assert_eq!(Grid::on(&[0, 1]), Grid::on(&[0, 1]).spin(SPIN));
+}
+
+/// A kept thread spins after a launch for as long as its grid says: one whose grid spins without end has spun for
+/// twice `SPIN` after each launch, of threads and of blocks, of a grid the system places and of one placed.
+#[test]
+fn a_kept_thread_spins_after_a_launch_for_as_long_as_its_grid_says() -> Result {
+    let _alone = alone();
+    let Some([a, b, c, _]) = four()? else { return Ok(()) };
+    let three = [a, b, c];
+    for (how, grid) in [("Grid::new", Grid::new(THREADS)), ("Grid::on", Grid::on(&three))] {
+        let grid = grid.spin(WITHOUT_END);
+        let tasks = kept(grid)?;
+        spin_after_each(&format!("{how}, launches of threads"), &tasks, || Ok(launch(grid, |_| {})?))?;
+        spin_after_each(&format!("{how}, launches of blocks"), &tasks, || one_block_each(grid))?;
+    }
+    Ok(())
+}
+
+/// A kept thread sleeps once its spin is over: at once where its grid says a spin of nothing, and after
+/// `kernite_cpu::SPIN` where it says none. After a launch of threads and one of blocks, of a grid the system places
+/// and of one placed, the test waits until each kept thread sleeps.
+#[test]
+fn a_kept_thread_sleeps_once_its_spin_is_over() -> Result {
+    let _alone = alone();
+    let Some([a, b, c, _]) = four()? else { return Ok(()) };
+    let three = [a, b, c];
+    for (how, grid) in [("Grid::new", Grid::new(THREADS)), ("Grid::on", Grid::on(&three))] {
+        for (spin, grid) in [("a spin of nothing", grid.spin(Duration::ZERO)), ("no spin said", grid)] {
+            let tasks = kept(grid)?;
+            for blocks in [false, true] {
+                if blocks {
+                    one_block_each(grid)?;
+                } else {
+                    launch(grid, |_| {})?;
+                }
+                for task in &tasks {
+                    until(&format!("{how}, {spin}, blocks {blocks}: {} asleep", name(task)), || asleep(task))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The caller sleeps once its spin is over, as it waits for the others to end: at once where its grid says a spin of
+/// nothing, and after `kernite_cpu::SPIN` where it says none. In a launch of two threads, and in one of two blocks,
+/// each part waits for the other to begin, so that each thread has one; and the part of the thread that is not the
+/// caller's ends once the caller sleeps, which has no block left then. A caller that spun until the others ended
+/// would never sleep, and the launch would not end.
+#[test]
+fn the_caller_sleeps_once_its_spin_is_over_as_it_waits_for_the_others() -> Result {
     let _alone = alone();
     if most()? < 2 {
         eprintln!("the process runs one thread at once: skipped");
         return Ok(());
     }
-    // The caller's own counts are exact: they are read as it runs.
-    let files = (File::open("/proc/thread-self/status")?, File::open("/proc/thread-self/schedstat")?);
-    // This launch starts the second thread, and a launch that starts one is not the one to count.
-    waited(Grid::new(2), &files)?;
-    for round in 0..ROUNDS {
-        let since = waited(Grid::new(2), &files)?;
-        assert!(since.stopped > 0, "round {round}: the caller did not stop to wait for a thread that took {LATE:?}");
-    }
-    let grid = Grid::new(2).spin(Duration::from_millis(5));
-    let mut did_not_stop = false;
-    for _ in 0..TRIES {
-        did_not_stop = waited(grid, &files)?.stopped == 0;
-        if did_not_stop {
-            break;
+    let (caller, id) = (Arc::new(me()?), thread::current().id());
+    for (spin, grid) in [("a spin of nothing", Grid::new(2).spin(Duration::ZERO)), ("no spin said", Grid::new(2))] {
+        for blocks in [false, true] {
+            let (seen, begun, at) = (Arc::new(Mutex::new(None)), Arc::new(AtomicUsize::new(0)), Arc::clone(&caller));
+            let into = Arc::clone(&seen);
+            let part = move || {
+                begun.fetch_add(1, AcqRel);
+                let both = until("the other part begun", || Ok(begun.load(Acquire) >= 2));
+                if thread::current().id() != id {
+                    let slept = both.and_then(|()| until("the caller asleep", || asleep(&at)));
+                    *into.lock().unwrap_or_else(PoisonError::into_inner) = Some(slept.map_err(|e| e.to_string()));
+                }
+            };
+            if blocks {
+                launch_blocks(grid, 2, move |_| part())?;
+            } else {
+                launch(grid, move |_| part())?;
+            }
+            let seen = seen.lock().unwrap_or_else(PoisonError::into_inner).take();
+            assert_eq!(seen, Some(Ok(())), "{spin}, blocks {blocks}: the other thread waited for the caller to sleep");
         }
     }
-    assert!(
-        did_not_stop,
-        "the caller stopped to wait in each of {TRIES} rounds, for a thread that took {LATE:?}, with a spin of 5 ms"
-    );
     Ok(())
 }
 
-/// The caller waits for the others to end spinning for as long as its grid says: the others are one thread, whose
-/// launch takes `LATE`.
+/// The caller spins for as long as its grid says as it waits for the others to end. In a launch of two threads, and in
+/// one of two blocks, of a grid that spins without end, each part waits for the other to begin; the part of the thread
+/// that is not the caller's waits until the caller's is over, and then until the caller has spun for twice `SPIN`, as
+/// `spun` says.
 #[test]
-fn the_caller_waits_for_the_others_spinning_for_as_long_as_its_grid_says() -> Result {
-    the_caller_waits_as_its_grid_says(waited_for_the_second)
-}
-
-/// A launch of two blocks, one for each of two threads, of which the thread that is not the caller's takes `LATE` to
-/// end its own, and what the caller, whose files in `/proc` are `files`, did while it waited for the launch to end. The
-/// caller's block waits for the other thread to have begun its own, so that the caller has no block left to take, and
-/// the other thread's block ends last, whichever block each takes.
-fn waited_for_the_last_block(grid: Grid<'_>, files: &(File, File)) -> Result<Since> {
-    let before = Count::of(&files.0, &files.1)?;
-    let (caller, begun) = (thread::current().id(), Arc::new(AtomicU64::new(0)));
-    launch_blocks(grid, 2, move |_| {
-        if thread::current().id() == caller {
-            while begun.load(Relaxed) == 0 {
-                spin_loop();
-            }
-        } else {
-            begun.store(1, Relaxed);
-            thread::sleep(LATE);
-        }
-    })?;
-    Ok(Count::of(&files.0, &files.1)?.since(&before))
-}
-
-/// The caller of a launch of blocks waits for the last block to end spinning for as long as its grid says: the last is
-/// the block of the one other thread, whose block takes `LATE`.
-#[test]
-fn the_caller_of_a_launch_of_blocks_waits_for_the_last_block_spinning_for_as_long_as_its_grid_says() -> Result {
-    the_caller_waits_as_its_grid_says(waited_for_the_last_block)
-}
-
-/// A launch that moves a thread onto the CPU of a kept thread that was to spin for ten seconds ends that spin before it
-/// moves anything, as it ends one of `SPIN`: in some round the kept thread in the way stops to wait after a few
-/// microseconds of CPU, and no thread has taken its CPU. A round is two launches, as in the first case of
-/// `a_launch_that_moves_a_thread_onto_the_cpu_of_a_kept_thread_ends_its_spin_before_it_moves`: three threads on the
-/// first three CPUs, kept; and the second, which moves the caller's thread onto the CPU of the third, which it does
-/// not use. No round lasts as long as the spin: a launch does not wait for it.
-#[test]
-fn a_launch_that_moves_a_thread_ends_a_spin_that_was_to_last_ten_seconds_at_once() -> Result {
+fn the_caller_spins_for_as_long_as_its_grid_says_as_it_waits_for_the_others() -> Result {
     let _alone = alone();
-    let Some(on) = four()? else { return Ok(()) };
-    let first = Grid::on(&on[..THREADS]).spin(LONG);
-    let caller_to_third = [on[2], on[1]];
-    let second = Grid::on(&caller_to_third).spin(LONG);
-    let mut counter = Counter::default();
-    let (mut ended, mut slowest) = (false, Duration::ZERO);
-    for _ in 0..TRIES {
-        let began = Instant::now();
-        let (told_first, told_second) = (counter.launch(first)?, counter.launch(second)?);
-        slowest = slowest.max(began.elapsed());
-        // The third thread, at index 2.
-        ended = told_first[2] || told_second[2];
-        if ended {
-            break;
-        }
+    if most()? < 2 {
+        eprintln!("the process runs one thread at once: skipped");
+        return Ok(());
     }
-    let message = "rounds found the kept thread in the way stop to wait early, with no thread taking its CPU";
-    assert!(ended, "none of {TRIES} {message}, though its spin was to last {LONG:?}");
-    assert!(slowest < LONG / 10, "a round of two launches took {slowest:?}, where a spin of {LONG:?} was to end");
+    let (caller, id) = (Arc::new(me()?), thread::current().id());
+    let grid = Grid::new(2).spin(WITHOUT_END);
+    for blocks in [false, true] {
+        let (seen, begun, over) =
+            (Arc::new(Mutex::new(None)), Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)));
+        let (into, at) = (Arc::clone(&seen), Arc::clone(&caller));
+        let part = move || {
+            begun.fetch_add(1, AcqRel);
+            let both = until("the other part begun", || Ok(begun.load(Acquire) >= 2));
+            if thread::current().id() == id {
+                over.store(true, Release);
+            } else {
+                let over = both.and_then(|()| until("the caller's part over", || Ok(over.load(Acquire))));
+                let spun = over.and_then(|()| spun("the caller", slice::from_ref(&*at)));
+                *into.lock().unwrap_or_else(PoisonError::into_inner) = Some(spun.map_err(|e| e.to_string()));
+            }
+        };
+        if blocks {
+            launch_blocks(grid, 2, move |_| part())?;
+        } else {
+            launch(grid, move |_| part())?;
+        }
+        let seen = seen.lock().unwrap_or_else(PoisonError::into_inner).take();
+        assert_eq!(seen, Some(Ok(())), "blocks {blocks}: what the other thread saw of the caller");
+    }
+    Ok(())
+}
+
+/// A launch that moves a thread onto the CPU of a kept thread, and does not use it, ends its spin, and the thread
+/// sleeps; the kept thread that the launch uses spins after it, and after each launch of that grid that follows, as
+/// the grid says, without end. The first launch puts three threads on the first three CPUs, and the second moves a
+/// thread onto the CPU of the third:
+///
+/// - the caller's thread goes where the third spins, and the second launch uses the second thread;
+/// - the second thread goes where the third spins, and the caller's thread stays.
+#[test]
+fn a_launch_that_moves_a_thread_onto_the_cpu_of_a_kept_thread_ends_its_spin() -> Result {
+    let _alone = alone();
+    let Some([a, b, c, _]) = four()? else { return Ok(()) };
+    let three = [a, b, c];
+    let first = Grid::on(&three).spin(WITHOUT_END);
+    let cases = [
+        ("the caller's thread goes where the third spins", [c, b]),
+        ("the second thread goes where the third spins", [a, c]),
+    ];
+    for (what, second) in cases {
+        let second = Grid::on(&second).spin(WITHOUT_END);
+        let tasks = kept(first)?;
+        let [used, in_the_way] = tasks.as_slice() else { return Err("kept gave other than two threads".into()) };
+        // The first launch of the second grid is the one that moves the thread.
+        spin_after_each(what, slice::from_ref(used), || Ok(launch(second, |_| {})?))?;
+        until(&format!("{what}: the third thread asleep"), || asleep(in_the_way))?;
+    }
+    Ok(())
+}
+
+/// A launch ends the spin of no kept thread that no thread moves onto the CPU of: not when it moves none, and not when
+/// the CPU a thread moves to is free. After a launch of three threads on the first three CPUs, which spin without end,
+/// launches of a grid that uses the first kept thread and not the second find both spinning: the first as the second
+/// grid says, and the second as the first grid said, without end.
+#[test]
+fn a_launch_ends_the_spin_of_no_kept_thread_that_no_thread_moves_onto_the_cpu_of() -> Result {
+    let _alone = alone();
+    let Some([a, b, c, d]) = four()? else { return Ok(()) };
+    let three = [a, b, c];
+    let first = Grid::on(&three).spin(WITHOUT_END);
+    for (what, second) in [("no thread moves", [a, b]), ("the caller's thread goes to a CPU where none spins", [d, b])]
+    {
+        let second = Grid::on(&second).spin(WITHOUT_END);
+        let tasks = kept(first)?;
+        spin_after_each(what, &tasks, || Ok(launch(second, |_| {})?))?;
+    }
+    Ok(())
+}
+
+/// A launch that moves a thread ends the spin of the kept threads the system places, which may spin on any CPU: after a
+/// launch of three threads that the system places, which spin without end, a launch that places the caller's thread
+/// alone, and so moves it, has each kept thread sleep.
+#[test]
+fn a_launch_that_moves_a_thread_ends_the_spin_of_the_kept_threads_the_system_places() -> Result {
+    let _alone = alone();
+    let Some([a, ..]) = four()? else { return Ok(()) };
+    let tasks = kept(Grid::new(THREADS).spin(WITHOUT_END))?;
+    launch(Grid::on(&[a]), |_| {})?;
+    for task in &tasks {
+        until(&format!("{} asleep", name(task)), || asleep(task))?;
+    }
+    Ok(())
+}
+
+/// A kept thread whose spin a launch ended spins again after the next launch that uses it, for as long as that grid
+/// says. The launch that moves the caller's thread onto the CPU of the third thread, and does not use it, ends its
+/// spin, and the thread sleeps; the first launch again, which puts the caller's thread back and uses the third, has it
+/// spin without end after, and after each launch of that grid that follows.
+#[test]
+fn a_kept_thread_whose_spin_a_launch_ended_spins_again_after_the_next_launch_that_uses_it() -> Result {
+    let _alone = alone();
+    let Some([a, b, c, _]) = four()? else { return Ok(()) };
+    let (three, caller_to_third) = ([a, b, c], [c, b]);
+    let first = Grid::on(&three).spin(WITHOUT_END);
+    let tasks = kept(first)?;
+    let [_, third] = tasks.as_slice() else { return Err("kept gave other than two threads".into()) };
+    launch(Grid::on(&caller_to_third).spin(WITHOUT_END), |_| {})?;
+    until("the third thread asleep, its spin ended", || asleep(third))?;
+    spin_after_each("the third thread", slice::from_ref(third), || Ok(launch(first, |_| {})?))?;
+    Ok(())
+}
+
+/// A launch that ends the spin of a kept thread, and uses it, leaves it spinning after, for as long as that launch's
+/// grid says: the spin it ends is the one that was to last after the launch before. The launch that swaps the caller's
+/// thread and the first kept thread ends the spin of the kept thread and uses it, and the thread spins without end
+/// after that launch, and after each launch of that grid that follows, which moves none.
+#[test]
+fn a_launch_that_ends_the_spin_of_a_kept_thread_and_uses_it_leaves_it_spinning_after() -> Result {
+    let _alone = alone();
+    let Some([a, b, c, _]) = four()? else { return Ok(()) };
+    let (three, swapped) = ([a, b, c], [b, a]);
+    let (first, second) = (Grid::on(&three).spin(WITHOUT_END), Grid::on(&swapped).spin(WITHOUT_END));
+    let tasks = kept(first)?;
+    let [moved, _] = tasks.as_slice() else { return Err("kept gave other than two threads".into()) };
+    // The first launch of the second grid is the one that swaps the threads.
+    spin_after_each("the first kept thread", slice::from_ref(moved), || Ok(launch(second, |_| {})?))?;
     Ok(())
 }
 
 /// Kept threads of two callers that a placed grid each puts on one CPU share it while they spin, as any two threads on
-/// one CPU do: each launch waits for its kept thread to get the CPU, and not for the other thread's spin to end. Each
-/// caller makes 50 launches, each of which runs its two threads once, with a spin of ten seconds, and none takes a
-/// tenth as long.
+/// one CPU do: each launch waits for its kept thread to get the CPU, and not for the other's spin, which is without
+/// end, to end. Each caller makes 50 launches, each of which runs its two threads once, and all end.
 #[test]
 fn kept_threads_of_two_callers_placed_on_one_cpu_share_it_while_they_spin() -> Result {
     let _alone = alone();
-    let Some(on) = four()? else { return Ok(()) };
-    let start = Arc::new(Barrier::new(2));
+    let Some([a, b, c, _]) = four()? else { return Ok(()) };
+    let (start, (ended, all)) = (Arc::new(Barrier::new(2)), mpsc::channel());
     // Each caller's thread is on a CPU of its own, and the kept thread of each is on the third.
-    let callers = [[on[0], on[2]], [on[1], on[2]]].map(|placed| {
-        let start = Arc::clone(&start);
-        thread::spawn(move || -> Result<Duration> {
+    for placed in [[a, c], [b, c]] {
+        let (start, ended) = (Arc::clone(&start), ended.clone());
+        thread::spawn(move || {
             start.wait();
-            let mut slowest = Duration::ZERO;
-            for _ in 0..50 {
-                let ran = Arc::new(AtomicU64::new(0));
+            let launches = (0..50).try_for_each(|_| -> Result {
+                let ran = Arc::new(AtomicUsize::new(0));
                 let into = Arc::clone(&ran);
-                let began = Instant::now();
-                launch(Grid::on(&placed).spin(LONG), move |_| {
-                    into.fetch_add(1, Relaxed);
-                })?;
-                slowest = slowest.max(began.elapsed());
-                assert_eq!(
-                    ran.load(Relaxed),
-                    2,
-                    "a launch of two threads on {placed:?} ran its kernel that many times"
-                );
-            }
-            Ok(slowest)
-        })
-    });
-    for caller in callers {
-        let slowest = caller.join().map_err(|panic| format!("a caller panicked: {panic:?}"))??;
-        assert!(slowest < LONG / 10, "a launch took {slowest:?}, where the other caller's spin of {LONG:?} was to end");
+                launch(Grid::on(&placed).spin(WITHOUT_END), move |_| _ = into.fetch_add(1, AcqRel))?;
+                match ran.load(Acquire) {
+                    2 => Ok(()),
+                    n => Err(format!("a launch of two threads on {placed:?} ran its kernel {n} times").into()),
+                }
+            });
+            let _ = ended.send(launches.map_err(|e| e.to_string()));
+        });
+    }
+    for _ in 0..2 {
+        all.recv_timeout(HANG).map_err(|_| format!("a caller's launches did not end in {HANG:?}: a hang"))??;
     }
     Ok(())
 }
