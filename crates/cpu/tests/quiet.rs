@@ -85,7 +85,11 @@ fn steps_of(name: &str, threads: usize, placed: bool) -> Result<Option<Vec<Vec<S
     let text = format!("{}{}", String::from_utf8_lossy(&run.stdout), String::from_utf8_lossy(&run.stderr));
     assert!(run.status.success(), "{name}, run again under strace, failed:\n{text}");
     let calls = fs::read_to_string(log)?;
-    let calls: Vec<&str> = calls.lines().collect();
+    // Each call is shown with the number of its thread. The first thread's are libtest's, which runs the test on a
+    // thread of its own and waits for it: none is kernite's, and `strace` shows each where it sees it, which may come
+    // after a call the test's thread made later, under load. They are left out.
+    let libtest = calls.split_once(' ').map(|(thread, _)| format!("{thread} ")).ok_or("strace showed no call")?;
+    let calls: Vec<&str> = calls.lines().filter(|call| !call.starts_with(&libtest)).collect();
     // The quote ends the name of the file, for `-1` not to be found in `-10`.
     let at = |step: usize| calls.iter().position(|call| call.contains(&format!("{MARK}{step}\"")));
     let marks: Vec<usize> = (0..).map_while(at).collect();
