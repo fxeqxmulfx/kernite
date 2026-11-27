@@ -15,7 +15,8 @@ use std::time::{Duration, Instant};
 
 use common::{BUILD_ENV, ROOT, Result, written};
 
-/// How long rust-analyzer has to say what a test waits for: it builds the macros first.
+/// How long rust-analyzer has to say what a test waits for: it builds the macros first, in a minute or two, and only a
+/// hang takes this long, so that no test holds how long rust-analyzer takes.
 const LIMIT: Duration = Duration::from_secs(900);
 
 /// The rust-analyzer a test runs: `$RUST_ANALYZER`, or the one on the path, if it runs; `None` where there is none.
