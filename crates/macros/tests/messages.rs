@@ -5,14 +5,15 @@
 //! crate's `src/lib.rs`, so the line an error names is that line of the fixture. One that holds
 //! tests is run as well, to show that its kernels do what they are written to.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::PoisonError;
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 
 mod common;
 
-use common::{BUILD_ENV, CARGO, ROOT, Result, crate_of, written};
+use common::{BUILD_ENV, ROOT, Result, crate_of, fixture, written};
 
 /// Whether Cargo did `command`, `["build"]` say, for fixture `name`, written afresh, and what it
 /// said, a line each, in order.
@@ -30,8 +31,9 @@ fn edited(name: &str, edits: &[(&str, &str)]) -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// Crate `name`, which a test has written, a dependency of the crate at `dir`.
+/// Crate `name`, which a test has written, a dependency of the crate at `dir`, which is built where `name` was.
 fn depends_on(dir: &Path, name: &str) -> Result {
+    built_beside(&fixture_at(dir)?, name);
     let manifest = dir.join("Cargo.toml");
     let path = Path::new(ROOT).join(name).join("project");
     let line = format!("[dependencies]\n{name} = {{ path = {:?} }}\n", path.display().to_string());
@@ -52,19 +54,99 @@ fn cargo_in(command: &[&str], dir: &Path) -> Result<(bool, Vec<String>)> {
     Ok((out.status.success(), said.lines().map(String::from).collect()))
 }
 
+/// How many Cargos build fixtures at once, each in a target directory of its own: a Cargo holds its target directory
+/// while it builds, and one that would build in it as well waits, and says so. Each target directory has the crates
+/// the fixtures depend on built in it, which takes a few seconds.
+const TARGETS: usize = 8;
+
+/// Which target directories a Cargo builds in, and the one each fixture is built in, by its name: the one that no Cargo
+/// was building in when it was built first, or that of the fixture it depends on. Each build of a fixture is in the
+/// same one, as each build of a user's crate is, so that what a build leaves for the next is there.
+struct Targets {
+    held: BTreeSet<usize>,
+    of: BTreeMap<String, usize>,
+}
+
+static TARGETS_NOW: Mutex<Targets> = Mutex::new(Targets { held: BTreeSet::new(), of: BTreeMap::new() });
+
+/// Told each time a target directory is let go.
+static LET_GO: Condvar = Condvar::new();
+
+/// [`TARGETS_NOW`], which a test that panicked while it held it leaves as it was.
+fn targets() -> MutexGuard<'static, Targets> {
+    TARGETS_NOW.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Target directory `at`, where Cargo builds the fixtures given it.
+fn target_dir(at: usize) -> PathBuf {
+    Path::new(ROOT).join(format!("target-{at}"))
+}
+
+/// A target directory held: no Cargo builds in it but the one this is for, until this is dropped.
+struct Held(usize);
+
+impl Held {
+    /// The target directory fixture `name` is built in, held, once no Cargo builds in it: the one it was built in
+    /// before, or, if it has none, the first that is free, which is its own from now on.
+    fn building(name: &str) -> Held {
+        let mut now = targets();
+        loop {
+            let free = match now.of.get(name) {
+                Some(&at) => (!now.held.contains(&at)).then_some(at),
+                None => (0..TARGETS).find(|at| !now.held.contains(at)),
+            };
+            if let Some(at) = free {
+                now.held.insert(at);
+                now.of.insert(name.into(), at);
+                return Held(at);
+            }
+            now = LET_GO.wait(now).unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        targets().held.remove(&self.0);
+        LET_GO.notify_all();
+    }
+}
+
+/// That fixture `name` is built where fixture `dependency` was, which a build of it builds again: where the dependency
+/// has been built, the build of `name` finds it built.
+fn built_beside(name: &str, dependency: &str) {
+    let mut now = targets();
+    if let Some(&at) = now.of.get(dependency) {
+        now.of.insert(name.into(), at);
+    }
+}
+
+/// The target directory fixture `name` was built in, where its documents and its library are.
+fn target_of(name: &str) -> Result<PathBuf> {
+    let at = *targets().of.get(name).ok_or_else(|| format!("fixture {name} was not built"))?;
+    Ok(target_dir(at))
+}
+
+/// The fixture whose crate is at `dir`, or in it: `ROOT/name/project` is fixture `name`'s.
+fn fixture_at(dir: &Path) -> Result<String> {
+    let name = dir.strip_prefix(ROOT)?.iter().next().ok_or_else(|| format!("{} is no fixture's", dir.display()))?;
+    Ok(name.to_string_lossy().into_owned())
+}
+
 /// What Cargo did when it ran `command` in the crate at `dir`, saying its messages in `format`: `short`, a line each,
 /// as the tests compare them, or `human`, in full, as it says them to a person; what follows a `--` in `command` is for
-/// rustc. The crate is built offline into `kernite-macros/target`, so that it never waits for the build that runs these
-/// tests. What the environment would change of a build is taken out of it, and the build is incremental, as the dev
-/// profile's is: only then does rustc tell of a use at one place once for each function that has it, which the tests of
-/// deprecated items count.
+/// rustc. The crate is built offline into a target directory of the fixtures', `kernite-macros/target-0` say, so that
+/// it never waits for the build that runs these tests, and Cargos build several fixtures at once. What the environment
+/// would change of a build is taken out of it, and the build is incremental, as the dev profile's is: only then does
+/// rustc tell of a use at one place once for each function that has it, which the tests of deprecated items count.
 fn cargo_out(format: &str, command: &[&str], dir: &Path) -> Result<Output> {
-    let _one = CARGO.lock().unwrap_or_else(PoisonError::into_inner);
+    let name = fixture_at(dir)?;
+    let (_one, target) = (fixture(&name), Held::building(&name));
     let (cargo, rustc) = command.split_at(command.iter().position(|&word| word == "--").unwrap_or(command.len()));
     let mut run = Command::new(env!("CARGO"));
     run.args(cargo);
     run.args(["--offline", "--quiet", "--color=never", "--target-dir"]);
-    run.arg(Path::new(ROOT).join("target")).arg(format!("--message-format={format}")).args(rustc).current_dir(dir);
+    run.arg(target_dir(target.0)).arg(format!("--message-format={format}")).args(rustc).current_dir(dir);
     for var in BUILD_ENV {
         run.env_remove(var);
     }
@@ -114,7 +196,7 @@ fn runs_quietly_in(command: &[&str], name: &str, dir: &Path) -> Result<String> {
 fn documents_quietly(name: &str) -> Result<PathBuf> {
     let (done, said) = cargo(&["doc", "--no-deps"], name)?;
     assert!(done && said.is_empty(), "fixtures/{name}.rs: documented {done}, and Cargo said:\n{}", said.join("\n"));
-    Ok(Path::new(ROOT).join("target/doc").join(name))
+    Ok(target_of(name)?.join("doc").join(name))
 }
 
 /// That Cargo documents fixture `name` without a word; then, of each function `f` of its module
@@ -543,7 +625,7 @@ fn the_ptx_of_a_kernel_of_much_code_is_built_where_it_is_made_and_in_each_crate_
     Ok(())
 }
 
-/// A module whose PTX has the name of its static 100000 times has 100000 holes in a part of 5 MB, more than one
+/// A module whose PTX has the name of its static 30000 times has 30000 holes in a part of 1.5 MB, more than one
 /// constant of Rust's takes steps for: the macros cut it in parts of a few thousand pieces, and the second crate holds
 /// that each use of the static has its name, whole, where a part is cut as well as where it is not, and that no hole is
 /// left.
@@ -556,13 +638,13 @@ fn a_part_with_many_holes_is_cut_and_each_hole_has_the_names_of_the_path() -> Re
     Ok(())
 }
 
-/// `__named!` joins parts of 16 MiB in all, with 100 000 holes, in a constant of a crate that allows nothing, and in a
+/// `__named!` joins parts of 5 MiB in all, with 30 000 holes, in a constant of a crate that allows nothing, and in a
 /// crate that names the constant. The pieces are told apart by a number, and have a character of two bytes in them, so
 /// that a piece joined at the wrong place, or cut in a character, is found: the second crate holds the text to the
 /// pieces of the first, with the names of the path in each hole, `app::gpu` as `3app3gpu`, and none between the parts.
 #[test]
 fn parts_of_megabytes_with_many_holes_are_joined_with_the_names_in_each_hole() -> Result {
-    const PARTS: usize = 100;
+    const PARTS: usize = 30;
     const PIECES: usize = 1001;
     let piece = |n: usize| format!("{n:08}{}", "ß".repeat(80));
     let mut lib = String::from("pub const TEXT: &str = kernite_cuda::__named!(\"app::gpu\", [\n");
@@ -574,11 +656,11 @@ fn parts_of_megabytes_with_many_holes_are_joined_with_the_names_in_each_hole() -
         lib.push_str("],\n");
     }
     lib.push_str("]);\n");
-    let dir = generated("parts_of_16_mib", &lib)?;
-    builds_quietly_in(&["build"], "parts_of_16_mib", &dir)?;
+    let dir = generated("parts_of_5_mib", &lib)?;
+    builds_quietly_in(&["build"], "parts_of_5_mib", &dir)?;
     let user = r#"
 /// The bytes of the text, known now: Rust makes the constant, and counts its steps, in this crate.
-pub const LEN: usize = parts_of_16_mib::TEXT.len();
+pub const LEN: usize = parts_of_5_mib::TEXT.len();
 
 /// Piece `n` as the other crate has it.
 pub fn piece(n: usize) -> String {
@@ -587,7 +669,7 @@ pub fn piece(n: usize) -> String {
 
 #[test]
 fn the_text_is_the_pieces_with_the_names_in_each_hole_and_none_between_the_parts() {
-    let mut rest = parts_of_16_mib::TEXT;
+    let mut rest = parts_of_5_mib::TEXT;
     for part in 0..@PARTS@ {
         for i in 0..@PIECES@ {
             let piece = piece(part * @PIECES@ + i);
@@ -603,9 +685,9 @@ fn the_text_is_the_pieces_with_the_names_in_each_hole_and_none_between_the_parts
 "#
     .replace("@PARTS@", &PARTS.to_string())
     .replace("@PIECES@", &PIECES.to_string());
-    let user = generated("parts_of_16_mib_user", &user)?;
-    depends_on(&user, "parts_of_16_mib")?;
-    runs_quietly_in(&["test"], "parts_of_16_mib_user", &user)?;
+    let user = generated("parts_of_5_mib_user", &user)?;
+    depends_on(&user, "parts_of_5_mib")?;
+    runs_quietly_in(&["test"], "parts_of_5_mib_user", &user)?;
     Ok(())
 }
 
@@ -5125,7 +5207,7 @@ fn a_kernel_with_numbers_builds_without_a_word_of_whatever_kind_it_is() -> Resul
 #[test]
 fn the_launcher_of_a_cooperative_kernel_that_takes_numbers_runs_its_first_closure() -> Result {
     builds_quietly("closure_names")?;
-    let library = Path::new(ROOT).join("target/debug/libclosure_names.rlib");
+    let library = target_of("closure_names")?.join("debug/libclosure_names.rlib");
     let Ok(out) = Command::new("nm").arg("--demangle").arg(library).output() else {
         eprintln!("no nm here: skipped");
         return Ok(());
