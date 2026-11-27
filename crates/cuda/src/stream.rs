@@ -1,6 +1,7 @@
 //! Streams: queues of a GPU's work.
 
 use std::cell::Cell;
+use std::ffi::{c_int, c_uint};
 use std::ptr;
 use std::rc::Rc;
 use std::thread;
@@ -12,6 +13,9 @@ use super::{Api, CuResult, Cuda, Driver, Error, Handle};
 /// `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED`: what the driver says of a call that it cannot record, or that would wait
 /// for the stream that captures, while a capture is on.
 const CAPTURE_UNSUPPORTED: CuResult = 900;
+
+/// `CU_STREAM_NON_BLOCKING`: the flag of a stream apart, whose work and the null stream's do not wait for each other.
+const APART: c_uint = 1;
 
 /// How long a drop waits between two tries of a call that a capture refuses: long enough not to keep a core busy for as
 /// long as the capture lasts, and short enough for the drop to be done soon after the capture is.
@@ -134,10 +138,33 @@ impl Cuda {
     /// A stream of this GPU: a queue of work that the GPU runs in order, beside the work of other streams. It is a
     /// blocking stream, as the null stream is: see [`Stream`].
     pub fn stream(&self) -> Result<Stream, Error> {
+        // 0 is `CU_STREAM_DEFAULT`, a blocking stream, at the priority 0, the least.
+        self.stream_of(0, 0)
+    }
+
+    /// A stream apart of this GPU: a stream whose work and the null stream's do not wait for each other, as two
+    /// streams' do not, so that the calls that wait for the null stream's work do not wait for its: see [`Stream`].
+    /// Where `urgent`, it has the GPU's greatest priority: where the kernels of several streams wait for room, the GPU
+    /// starts the urgent stream's first. It stops no kernel that runs, and its copies are not hastened.
+    pub fn stream_apart(&self, urgent: bool) -> Result<Stream, Error> {
+        let mut priority = 0;
+        if urgent {
+            let api = self.driver.current()?;
+            // SAFETY: it writes the greatest priority, the least number, to `priority`, and the least nowhere, as the
+            // driver takes a null pointer for a value not asked.
+            let asked = unsafe { (api.priorities)(ptr::null_mut(), &mut priority) };
+            api.check("cuCtxGetStreamPriorityRange", asked)?;
+        }
+        self.stream_of(APART, priority)
+    }
+
+    /// A stream of this GPU with the driver's `flags`, at `priority`.
+    fn stream_of(&self, flags: c_uint, priority: c_int) -> Result<Stream, Error> {
         let api = self.driver.current()?;
         let mut handle = ptr::null_mut();
-        // SAFETY: it writes the stream to `handle`. 0 is its flags, `CU_STREAM_DEFAULT`: a blocking stream.
-        api.check("cuStreamCreate", unsafe { (api.create_stream)(&mut handle, 0) })?;
+        // SAFETY: it writes the stream to `handle`.
+        let made = unsafe { (api.create_stream)(&mut handle, flags, priority) };
+        api.check("cuStreamCreateWithPriority", made)?;
         Ok(Stream { driver: Rc::clone(&self.driver), handle })
     }
 }
@@ -157,8 +184,15 @@ impl Cuda {
 /// the drop of a buffer, of unified memory and of a module. Two streams' work does not wait for each other, and runs at
 /// once where the GPU has room.
 ///
+/// A stream apart, which [`Cuda::stream_apart`] makes, is not blocking: its work and the null stream's do not wait for
+/// each other, and run at once where the GPU has room, as two streams' do. So the kernels launched before, which a
+/// call of the null stream waits for, are those of the null stream and of the blocking streams alone: `read`, `write`
+/// and `copy_from` do not wait for the work of a stream apart, nor do the zeros and the copies made outside a `run` of
+/// it. What waits for all of the GPU's work waits for its: [`Cuda::sync`], `host` and `host_mut`.
+///
 /// Dropping a stream destroys it. The work it has enqueued runs on, and the memory that work reaches lasts until it is
-/// done, as the drop of memory waits for it.
+/// done: the drop of memory waits for the work of a blocking stream, and comes after that of a stream apart, as
+/// [`run`](Stream::run) says.
 pub struct Stream {
     pub(super) driver: Rc<Driver>,
     pub(super) handle: Handle,
@@ -179,6 +213,9 @@ impl Stream {
     /// null stream's work and a [`sync`](Stream::sync) order it with the rest. kernite cannot see what the work of
     /// two streams reaches, and to keep it itself it would have to make each launch wait for the others, which the
     /// streams are for not doing. In `work`, each call is as safe as it is on the null stream.
+    ///
+    /// The null stream's work does not order the work of a stream apart: its `sync`, an event and [`Cuda::sync`] do.
+    /// The memory that its work reaches, and the module of its kernels, are dropped once the work is done.
     pub unsafe fn run<R>(&self, work: impl FnOnce() -> R) -> R {
         Run::of(self, None).during(work)
     }

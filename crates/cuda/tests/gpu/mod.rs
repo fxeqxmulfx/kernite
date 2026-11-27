@@ -244,7 +244,7 @@ pub fn run<R>(stream: &Stream, work: impl FnOnce() -> R) -> R {
     // `st.volatile` of the whole word. A copy or a zeroing may write it by stores of any width, and the tests do not
     // need to know which: a copy writes 1 over 0 and a zeroing 0 over 7, so the word changes in its low byte alone, and
     // a read sees the old word or the new. The words that the work writes are its own, and it reaches no other memory
-    // in common.
+    // in common. The work of a stream apart is done before the memory it reaches is dropped: each test waits for it.
     unsafe { stream.run(work) }
 }
 

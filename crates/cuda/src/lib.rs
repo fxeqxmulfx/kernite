@@ -60,7 +60,8 @@
 //! [`Stream::run`], which [`Cuda::stream`] makes: a launch goes to the current stream of its GPU on the thread, and so
 //! do a prefetch, a copy that does not wait, [`Cuda::copy`], and a zeroing: `zero`, and the zeros that [`Cuda::alloc`],
 //! [`Cuda::managed`], [`Buffer::grow`] and the load of a module write. A stream is blocking, so the copies and the
-//! drops that wait for the null stream's work wait for its work too. An [`Event`], which [`Cuda::event`] makes, is a
+//! drops that wait for the null stream's work wait for its work too. [`Cuda::stream_apart`] makes a stream apart, which
+//! is not, at the GPU's greatest priority where it is urgent. An [`Event`], which [`Cuda::event`] makes, is a
 //! point in the work of a stream: the host asks whether the work before it is done, or waits for it, and another
 //! stream waits for it with no wait of the host. [`Cuda::timed_event`] makes one that times work, and
 //! [`Event::duration_since`] says the time between two.
@@ -202,7 +203,8 @@ api! {
     can_access_peer = c"cuDeviceCanAccessPeer"(*mut c_int, c_int, c_int);
     enable_peer_access = c"cuCtxEnablePeerAccess"(Handle, c_uint);
     synchronize = c"cuCtxSynchronize"();
-    create_stream = c"cuStreamCreate"(*mut Handle, c_uint);
+    create_stream = c"cuStreamCreateWithPriority"(*mut Handle, c_uint, c_int);
+    priorities = c"cuCtxGetStreamPriorityRange"(*mut c_int, *mut c_int);
     destroy_stream = c"cuStreamDestroy_v2"(Handle);
     sync_stream = c"cuStreamSynchronize"(Handle);
     create_event = c"cuEventCreate"(*mut Handle, c_uint);
@@ -1664,17 +1666,37 @@ mod tests {
         0
     }
 
-    /// The fake driver's `cuStreamCreate`: the streams are 0x100, 0x200 and so on, and it says the flags it is given,
-    /// and the context it works in. In the context 13 it is `CUDA_ERROR_INVALID_CONTEXT`.
-    pub(super) unsafe extern "C" fn create_stream(at: *mut Handle, flags: c_uint) -> CuResult {
+    /// The fake driver's `cuStreamCreateWithPriority`: the streams are 0x100, 0x200 and so on, and it says the flags
+    /// and the priority it is given, and the context it works in. In the context 13 it is `CUDA_ERROR_INVALID_CONTEXT`.
+    pub(super) unsafe extern "C" fn create_stream(at: *mut Handle, flags: c_uint, priority: c_int) -> CuResult {
         if WORKING_IN.get() == 13 {
             return 201;
         }
         STREAMS_MADE.set(STREAMS_MADE.get() + 1);
         let stream = STREAMS_MADE.get() * 0x100;
-        ask(format!("create {stream:#x} with flags {flags} in {}", WORKING_IN.get()));
+        ask(format!("create {stream:#x} with flags {flags} at {priority} in {}", WORKING_IN.get()));
         // SAFETY: the caller gives a place for the stream.
         unsafe { *at = ptr::without_provenance_mut(stream) };
+        0
+    }
+
+    /// The fake driver's `cuCtxGetStreamPriorityRange`: the priorities of the fake GPU are 0, the least, to -5, the
+    /// greatest, and it writes those it is given a place for. It says the context it works in. In the context 13 it is
+    /// `CUDA_ERROR_INVALID_CONTEXT`.
+    unsafe extern "C" fn priorities(least: *mut c_int, greatest: *mut c_int) -> CuResult {
+        if WORKING_IN.get() == 13 {
+            return 201;
+        }
+        ask(format!("ask the priorities in {}", WORKING_IN.get()));
+        // SAFETY: the caller gives a place for each value it asks, and a null pointer for the others.
+        unsafe {
+            if let Some(least) = least.as_mut() {
+                *least = 0;
+            }
+            if let Some(greatest) = greatest.as_mut() {
+                *greatest = -5;
+            }
+        }
         0
     }
 
@@ -1966,6 +1988,7 @@ mod tests {
         api.launch = launch;
         api.launch_cooperative = launch_cooperative;
         api.create_stream = create_stream;
+        api.priorities = priorities;
         api.destroy_stream = destroy_stream;
         api.sync_stream = sync_stream;
         api.create_event = create_event;
@@ -2118,7 +2141,7 @@ mod tests {
     fn a_stream_is_made_blocking_waited_for_and_destroyed_as_the_driver_is_asked() -> Result {
         let cuda = gpu()?;
         let (first, second) = (cuda.stream()?, cuda.stream()?);
-        assert_eq!(asked(), ["create 0x100 with flags 0 in 1", "create 0x200 with flags 0 in 1"]);
+        assert_eq!(asked(), ["create 0x100 with flags 0 at 0 in 1", "create 0x200 with flags 0 at 0 in 1"]);
         first.sync()?;
         assert_eq!(asked(), ["sync 0x100 in 1"]);
         drop(cuda);
@@ -2129,12 +2152,34 @@ mod tests {
         Ok(())
     }
 
+    /// A stream apart is made as the driver is asked for a stream with `CU_STREAM_NON_BLOCKING`, 1, at the priority 0,
+    /// and an urgent one at the greatest priority that the driver says the GPU has: -5 on the fake GPU. A refusal of
+    /// either call is the error of making it.
+    #[test]
+    fn a_stream_apart_is_made_non_blocking_and_an_urgent_one_at_the_greatest_priority() -> Result {
+        let cuda = gpu()?;
+        let streams = (cuda.stream_apart(false)?, cuda.stream_apart(true)?);
+        let made =
+            ["create 0x100 with flags 1 at 0 in 1", "ask the priorities in 1", "create 0x200 with flags 1 at -5 in 1"];
+        assert_eq!(asked(), made);
+        drop(streams);
+        let said = "cuCtxGetStreamPriorityRange: CUDA_ERROR_INVALID_CONTEXT (201): invalid device context";
+        assert_eq!(gpu_in(13)?.stream_apart(true).err().ok_or("stream_apart gave Ok")?.to_string(), said);
+        let said = "cuStreamCreateWithPriority: CUDA_ERROR_INVALID_CONTEXT (201): invalid device context";
+        assert_eq!(gpu_in(13)?.stream_apart(false).err().ok_or("stream_apart gave Ok")?.to_string(), said);
+        Ok(())
+    }
+
     /// What the driver refuses is the error of the call it refused, in the driver's words: a stream is not made where
-    /// it refuses `cuStreamCreate`, and the work that failed on a stream is the error of the `sync` that waits for it.
+    /// it refuses `cuStreamCreateWithPriority`, and the work that failed on a stream is the error of the `sync` that
+    /// waits for it.
     #[test]
     fn a_refusal_of_the_driver_is_the_error_of_making_a_stream_and_of_waiting_for_one() -> Result {
         let e = gpu_in(13)?.stream().err().ok_or("stream gave Ok")?;
-        assert_eq!(e.to_string(), "cuStreamCreate: CUDA_ERROR_INVALID_CONTEXT (201): invalid device context");
+        assert_eq!(
+            e.to_string(),
+            "cuStreamCreateWithPriority: CUDA_ERROR_INVALID_CONTEXT (201): invalid device context"
+        );
         gpu()?.stream()?.sync()?;
         let e = gpu_in(14)?.stream()?.sync().err().ok_or("sync gave Ok")?;
         let said = "cuStreamSynchronize: CUDA_ERROR_ILLEGAL_ADDRESS (700): an illegal memory access was encountered";
@@ -2215,7 +2260,7 @@ mod tests {
         let (first, second) = (gpu_in(11)?, gpu_in(12)?);
         let (on_first, on_second) = (kernel(&first)?, kernel(&second)?);
         let (a, b) = (first.stream()?, second.stream()?);
-        assert_eq!(asked(), ["create 0x100 with flags 0 in 11", "create 0x200 with flags 0 in 12"]);
+        assert_eq!(asked(), ["create 0x100 with flags 0 at 0 in 11", "create 0x200 with flags 0 at 0 in 12"]);
         let (launch_a, launch_b) = running(&a, || (launched(&on_first), launched(&on_second)));
         assert_eq!(launch_a?, ["launch on 0x100 in 11"]);
         assert_eq!(launch_b?, ["launch on 0x0 in 12"]);
@@ -2776,7 +2821,7 @@ mod tests {
             assert_eq!(e.to_string(), says);
             let want = [
                 begin(0x100).replace("in 1", "in 2"),
-                format!("create {made:#x} with flags 0 in 1"),
+                format!("create {made:#x} with flags 0 at 0 in 1"),
                 format!("destroy {made:#x} in 1"),
                 // The capture's context cannot be made current: the capture is ended in the one that is, and the
                 // instantiate is not asked for.

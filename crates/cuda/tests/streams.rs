@@ -30,6 +30,9 @@ fn race(
 ) -> Result {
     let looks = if expected == SEEN { HANG } else { LOOKS };
     let (flag, out, mut go) = (cuda.alloc::<u32>(1)?, cuda.alloc::<u32>(1)?, cuda.pinned::<u32>(1)?);
+    // The zeros of the buffers are written before a kernel is queued: a stream apart does not wait for the null stream,
+    // which they go to.
+    cuda.sync()?;
     let (flag_at, out_at, go_at) = (flag.ptr(), out.ptr(), go.ptr());
     around_waits(&|| watch(module, go_at, flag_at, out_at, looks))?;
     around_sets(&|| launch(module, SETS, &[arg(&flag_at), arg(&AT_ONCE)]))?;
@@ -62,6 +65,56 @@ fn the_work_of_two_streams_runs_at_once_and_a_stream_and_the_null_stream_wait_fo
     race(&cuda, &module, NOT_SEEN, on(&a), on(&a), "one stream")?;
     // On `b`, `sets` waits for the null stream's `waits`.
     race(&cuda, &module, NOT_SEEN, on_null, on(&b), "the null stream, then a stream")?;
+    Ok(())
+}
+
+#[test]
+fn the_work_of_a_stream_apart_and_the_null_streams_run_at_once() -> Result {
+    let Some((cuda, _alone)) = cuda() else { return Ok(()) };
+    let module = load(&cuda)?;
+    let (apart, urgent, b) = (cuda.stream_apart(false)?, cuda.stream_apart(true)?, cuda.stream()?);
+    // `sets` on the null stream does not wait for `waits` on a stream apart, and `sets` on a stream apart does not wait
+    // for `waits` on the null stream, urgent or not.
+    race(&cuda, &module, SEEN, on(&apart), on_null, "a stream apart, then the null stream")?;
+    race(&cuda, &module, SEEN, on_null, on(&apart), "the null stream, then a stream apart")?;
+    race(&cuda, &module, SEEN, on(&urgent), on_null, "an urgent stream apart, then the null stream")?;
+    race(&cuda, &module, SEEN, on_null, on(&urgent), "the null stream, then an urgent stream apart")?;
+    // A stream apart and a stream run at once, as two streams do; on the stream apart of `waits`, `sets` is queued
+    // behind it.
+    race(&cuda, &module, SEEN, on(&apart), on(&b), "a stream apart, then a stream")?;
+    race(&cuda, &module, NOT_SEEN, on(&apart), on(&apart), "one stream apart")?;
+    Ok(())
+}
+
+#[test]
+fn the_host_waits_for_the_work_of_a_stream_apart_where_it_waits_for_all_of_the_gpus_alone() -> Result {
+    let Some((cuda, _alone)) = cuda() else { return Ok(()) };
+    let module = load(&cuda)?;
+    let apart = cuda.stream_apart(false)?;
+    let (mut buffer, mut done, null) = (cuda.alloc::<u32>(1)?, cuda.pinned::<u32>(1)?, cuda.event()?);
+    cuda.sync()?;
+    // While a kernel that the flag holds is queued on the stream apart, with `sets` behind it, the host reads the 0,
+    // writes a 5 and zeros it, and waits for an event of the null stream, which stands for the zeros and not for the
+    // kernel: a call that waited for the kernel would return when it gave up, in a hang, and the kernel would write
+    // `NOT_SEEN` to the flag. `sets` writes its 1 after the zeros.
+    let mut flag = held_sets(&cuda, &module, &apart, buffer.ptr())?;
+    assert_eq!(buffer.read()?, [0], "Buffer::read waited for the kernel of a stream apart");
+    buffer.write(&[5])?;
+    buffer.zero()?;
+    null.record()?;
+    null.sync()?;
+    poke(&mut flag, 1);
+    apart.sync()?;
+    assert_eq!(peek(&mut flag), SEEN, "read, write, zero or the event of the null stream waited for a stream apart");
+    assert_eq!(buffer.read()?, [1], "the zeros of the null stream came after the kernel of a stream apart");
+    // `Cuda::sync` and `host` wait for all of the GPU's work, and so for the stream apart's.
+    let mut flag = held_sets(&cuda, &module, &apart, done.ptr())?;
+    release_while(&mut flag, || cuda.sync())??;
+    assert_eq!(peek(&mut done), 1, "Cuda::sync returned before the kernel of a stream apart was done");
+    poke(&mut done, 0);
+    let mut flag = held_sets(&cuda, &module, &apart, done.ptr())?;
+    let read = release_while(&mut flag, || done.host().map(<[u32]>::to_vec))??;
+    assert_eq!(read, [1], "Unified::host returned before the kernel of a stream apart was done");
     Ok(())
 }
 

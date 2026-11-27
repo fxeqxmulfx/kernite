@@ -1117,12 +1117,21 @@ a module, wait for the stream's work. The work of two streams does not wait for 
 GPU has room. `stream.sync()` waits for the work of that stream alone, and `cuda.sync()` for all of the GPU's. Dropping
 a stream destroys it, and the work it holds runs on.
 
+`cuda.stream_apart(urgent)` is a stream apart: its work and the null stream's do not wait for each other, and run at
+once where the GPU has room, as two streams' do. So `read`, `write` and `copy_from` do not wait for its work, nor do the
+zeros and the copies made outside a `run` of it, and an event recorded on the null stream does not stand for its work.
+`cuda.sync()`, `host()` and `host_mut()` wait for all of the GPU's work, and so for its. An urgent stream apart has the
+GPU's greatest priority: where the kernels of several streams wait for room, the GPU starts the urgent stream's first.
+It stops no kernel that runs, and its copies are not hastened.
+
 `run` is `unsafe`, as kernite cannot see what the work of two streams reaches. Until the work that the closure launches
 is done, work of another stream that may run beside it must write no memory that it reaches, and reach none that it
-writes; the null stream's work, and `sync`, order the two. Each call in the closure is as safe as it is on the null
-stream. A launch asks the driver for `cuLaunchKernel` alone, whichever stream is current: kernite finds the current
-stream in a thread-local, which needs no call to the driver. That thread-local has no destructor, so a launch finds it
-as a thread ends too, in the destructor of another thread-local.
+writes; the null stream's work, and `sync`, order the two. The null stream's work does not order a stream apart's: its
+`sync`, an event and `cuda.sync()` do, and the memory its work reaches, and the module of its kernels, are dropped once
+that work is done. Each call in the closure is as safe as it is on the null stream. A launch asks the driver for
+`cuLaunchKernel` alone, whichever stream is current: kernite finds the current stream in a thread-local, which needs no
+call to the driver. That thread-local has no destructor, so a launch finds it as a thread ends too, in the destructor of
+another thread-local.
 
 `cuda.event()` is an event of the GPU: a point in the work of a stream, which the GPU reaches when it has done the work
 before it. `event.record()` puts the event after the work that the current stream has been given so far, and does not
@@ -1132,10 +1141,10 @@ work, and the host does not wait: that is how one stream waits for another, a ke
 writes, say. A record again makes the event stand for the work given by then, and for that alone. A record after a
 `wait` does not change what the stream waits for: the `wait` was for the work the event stood for then. An event never
 recorded stands for no work: it is done, and nothing waits for it. An event recorded on the null stream stands for the
-work that every stream of the GPU was given before the record, as a stream is blocking. Dropping an event destroys it
-and does not wait: the work goes on, and a stream that was made to wait for it still waits. `record` and `wait` go to
-the current stream of the event's GPU, as a launch does. Each asks the driver for its own function and no other, and
-finds the current stream with no call to the driver.
+work that every stream of the GPU but a stream apart was given before the record, as a stream is blocking. Dropping an
+event destroys it and does not wait: the work goes on, and a stream that was made to wait for it still waits. `record`
+and `wait` go to the current stream of the event's GPU, as a launch does. Each asks the driver for its own function and
+no other, and finds the current stream with no call to the driver.
 
 `cuda.timed_event()` is an event that times too. `later.duration_since(&earlier)` is the time from when the GPU reached
 `earlier` to when it reached `later`, as its own clock says it, as a `Duration`. Both have been recorded, and the work
