@@ -56,8 +56,8 @@ const DISABLE_TIMING: c_uint = 2;
 ///   host does not wait.
 ///
 /// An event that was never recorded stands for no work: it is done, and nothing waits for it. An event on the null
-/// stream stands for the work that every stream of the GPU was given before the record: a stream is blocking, as
-/// [`Stream`](super::Stream) says.
+/// stream stands for the work that every stream of the GPU but a stream apart was given before the record: a stream
+/// is blocking, as [`Stream`](super::Stream) says.
 ///
 /// Dropping an event destroys it, and does not wait: the work goes on, and a stream that was made to wait for it still
 /// waits.

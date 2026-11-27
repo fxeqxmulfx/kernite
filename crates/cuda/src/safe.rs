@@ -18,9 +18,10 @@ pub trait Memory<T: Plain>: sealed::Sealed {
     /// of another GPU than the module's.
     fn lend(&self, module: &Module) -> Result<(Ptr<T>, usize), Error>;
 
-    /// Its address and how many elements it has, as a copy on the GPU of `cuda` reaches them. It is an error if it is
-    /// memory of another GPU than `cuda`'s, or a slice that [`Cuda::lend`](super::Cuda::lend) lent.
-    fn reach(&self, cuda: &Cuda) -> Result<(Ptr<T>, usize), Error>;
+    /// Its address, how many elements it has, and how many of them are before the split of a buffer that
+    /// [`Buffer::move_split`] moved, all of them where none is, as a copy on the GPU of `cuda` reaches them. It is an
+    /// error if it is memory of another GPU than `cuda`'s, or a slice that [`Cuda::lend`](super::Cuda::lend) lent.
+    fn reach(&self, cuda: &Cuda) -> Result<(Ptr<T>, usize, usize), Error>;
 }
 
 /// Memory a kernel that is no `unsafe fn` writes: its launcher borrows it mutably, so that the host holds no slice of
@@ -54,9 +55,9 @@ impl<T: Plain> Memory<T> for Buffer<T> {
         Ok((self.ptr(), self.len))
     }
 
-    fn reach(&self, cuda: &Cuda) -> Result<(Ptr<T>, usize), Error> {
+    fn reach(&self, cuda: &Cuda) -> Result<(Ptr<T>, usize, usize), Error> {
         cuda.reaches(&self.driver)?;
-        Ok((self.ptr(), self.len))
+        Ok((self.ptr(), self.len, self.split().min(self.len)))
     }
 }
 
@@ -125,6 +126,12 @@ impl<R> Part<R> {
     pub(super) fn new<T>(of: R, at: Ptr<T>, len: usize) -> Part<R> {
         Part { of, addr: at.addr(), len }
     }
+
+    /// How many of its elements are before the split of a buffer, where `cut` elements of the memory at `at` that it
+    /// is a part of are.
+    fn cut<T>(&self, at: Ptr<T>, cut: usize) -> usize {
+        cut.saturating_sub((self.addr - at.addr()) as usize / size_of::<T>()).min(self.len)
+    }
 }
 
 /// Where `range` starts and how many elements it takes of `len`: `None` if it ends past the end, or before it starts.
@@ -150,9 +157,9 @@ impl<T: Plain, M: Memory<T>, R: Deref<Target = M>> Memory<T> for Part<R> {
         Ok((Ptr::new(self.addr), self.len))
     }
 
-    fn reach(&self, cuda: &Cuda) -> Result<(Ptr<T>, usize), Error> {
-        self.of.reach(cuda)?;
-        Ok((Ptr::new(self.addr), self.len))
+    fn reach(&self, cuda: &Cuda) -> Result<(Ptr<T>, usize, usize), Error> {
+        let (at, _, cut) = self.of.reach(cuda)?;
+        Ok((Ptr::new(self.addr), self.len, self.cut(at, cut)))
     }
 }
 
@@ -170,7 +177,7 @@ impl<T: Plain, R: Deref<Target = Buffer<T>>> Part<R> {
     /// many elements: `cuMemcpyDtoH: a part of a buffer of 4 elements read into 2`.
     pub fn read_into(&self, out: &mut [T]) -> Result<(), Error> {
         same_len("cuMemcpyDtoH", "a part of a buffer", self.len, "read into", out.len())?;
-        self.of.driver.read_into(self.addr, out)
+        self.of.driver.read_into(self.addr, out, self.cut(self.of.ptr(), self.of.split()))
     }
 }
 
@@ -179,7 +186,7 @@ impl<T: Plain> Part<&mut Buffer<T>> {
     /// elements: `cuMemcpyHtoD: a part of a buffer of 4 elements written with 2`.
     pub fn write(&mut self, data: &[T]) -> Result<(), Error> {
         same_len("cuMemcpyHtoD", "a part of a buffer", self.len, "written with", data.len())?;
-        self.of.driver.write(self.addr, data)
+        self.of.driver.write(self.addr, data, self.cut(self.of.ptr(), self.of.split()))
     }
 }
 

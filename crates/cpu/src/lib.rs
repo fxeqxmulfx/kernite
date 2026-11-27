@@ -797,24 +797,27 @@ fn wait<T>(from: &Receiver<T>, spin: Duration, rest: impl Fn() -> bool) -> Resul
     from.recv()
 }
 
+/// What the tests of how a grid's threads wait share, those in `tests/` and the crate's own.
+#[cfg(test)]
+#[path = "../tests/waits/mod.rs"]
+mod waits;
+
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::hint::black_box;
     use std::mem::{align_of, offset_of, size_of};
     use std::panic;
-    use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::AcqRel, Ordering::Acquire, Ordering::Relaxed};
     use std::sync::{Arc, Mutex, PoisonError, mpsc};
     use std::thread;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use super::{
-        Barrier, Cpus, Grid, Launch, Place, QUEUE, SPIN, Worker, checked, cpus, launch, launch_blocks, most, put_on,
-        rest, serve,
+        Barrier, Cpus, Grid, Launch, Place, QUEUE, Worker, checked, cpus, launch, launch_blocks, most, put_on, rest,
+        serve,
     };
-
-    type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
+    use crate::waits::{HANG, Result, asleep, me, stops, until};
 
     #[test]
     fn each_thread_runs_the_kernel_once_given_its_place() -> Result {
@@ -856,25 +859,28 @@ mod tests {
         Ok(())
     }
 
-    /// The caller's thread is the grid's first, and the launch returns once every thread has
-    /// ended: the others take a while, and each has run when it does.
+    /// The caller's thread is the grid's first, and the launch returns once every thread has ended: the others wait
+    /// until the caller sleeps, as it waits for them, and each has run when the launch returns.
     #[test]
     fn the_callers_thread_is_the_first_and_the_launch_returns_when_all_have_ended() -> Result {
-        let caller = thread::current().id();
+        let (caller, task) = (thread::current().id(), me()?);
         let threads = most()?.min(4);
         let ran = Arc::new(Mutex::new(vec![]));
         let into = Arc::clone(&ran);
         launch(Grid::new(threads), move |place| {
-            if place.thread() > 0 {
-                thread::sleep(Duration::from_millis(20));
-            }
-            into.lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push((place.thread(), thread::current().id() == caller));
+            let waited = match place.thread() {
+                0 => Ok(()),
+                _ => until("the caller asleep", || asleep(&task)).map_err(|e| e.to_string()),
+            };
+            into.lock().unwrap_or_else(PoisonError::into_inner).push((
+                place.thread(),
+                thread::current().id() == caller,
+                waited,
+            ));
         })?;
         let mut ran = ran.lock().unwrap_or_else(PoisonError::into_inner).clone();
         ran.sort();
-        let want: Vec<(u64, bool)> = (0..threads as u64).map(|t| (t, t == 0)).collect();
+        let want: Vec<(u64, bool, Result<(), String>)> = (0..threads as u64).map(|t| (t, t == 0, Ok(()))).collect();
         assert_eq!(ran, want);
         Ok(())
     }
@@ -983,36 +989,6 @@ mod tests {
         Ok(())
     }
 
-    /// Asserts that `work` on 1024 threads takes less than 8 times as long as on 256: 4 times if it
-    /// grows as its threads do, 16 if it grows as their square. Each is the quickest of many tries,
-    /// which other work on the machine slows the same.
-    fn assert_grows_as_threads_do(what: &str, work: impl Fn(usize)) -> Result {
-        let quickest = |threads: usize| -> Result<_> {
-            let tries = (0..100).map(|_| {
-                let began = Instant::now();
-                work(threads);
-                began.elapsed()
-            });
-            Ok(tries.min().ok_or("min gave None")?)
-        };
-        let (few, many) = (quickest(256)?, quickest(1024)?);
-        assert!(many < 8 * few, "{what} took {few:?} on 256 threads and {many:?} on 1024");
-        Ok(())
-    }
-
-    /// A placement of many CPUs is checked in time that grows as its threads do, not as their
-    /// square.
-    #[test]
-    fn a_placement_is_checked_in_time_that_grows_as_its_threads_do() -> Result {
-        let on: Vec<usize> = (0..1024).collect();
-        let mut home = Cpus::empty();
-        on.iter().for_each(|&cpu| _ = home.insert(cpu));
-        assert_grows_as_threads_do("the check", |threads| {
-            assert_eq!(black_box(checked(black_box(&on[..threads]), &home)), Ok(()));
-        })?;
-        Ok(())
-    }
-
     /// The check stops at the first thread it refuses, for a CPU the caller's thread may not run
     /// on or for one taken, and for a CPU taken it names the thread that had it first and the one
     /// that has it again.
@@ -1051,56 +1027,23 @@ mod tests {
             .find(|task| fs::read_to_string(task.join("comm")).is_ok_and(|comm| comm.trim_end() == name))
     }
 
-    /// Whether Linux says the thread sleeps, which a thread that spins does not: it runs, or waits
-    /// for a CPU.
-    fn asleep(task: &Path) -> bool {
-        let stat = fs::read_to_string(task.join("stat")).unwrap_or_default();
-        stat.rsplit_once(") ").is_some_and(|(_, state)| state.starts_with('S'))
-    }
-
-    /// For how long the thread has used the CPU, as Linux counts it; exact for a thread that sleeps.
-    fn used(task: &Path) -> Result<Duration> {
-        let schedstat = fs::read_to_string(task.join("schedstat"))?;
-        Ok(Duration::from_nanos(schedstat.split_whitespace().next().ok_or("next gave None")?.parse()?))
-    }
-
-    /// A thread started where the caller's thread is on one CPU sleeps, and uses no more CPU than
-    /// it takes to start, until it is told it is on its CPU, so that it never spins where the
-    /// caller has to run; told, it waits for launches there spinning, and uses CPU for [`SPIN`].
-    /// Other work on the machine keeps a thread from running, never from sleeping, so the test
-    /// looks at the least CPU a thread used before it was told and the most after, in a few threads.
+    /// A thread started where the caller's thread is on one CPU sleeps until it is told that it is on its CPU, so that
+    /// it never spins where the caller has to run. Told, it waits for launches there, spinning, and then sleeps again:
+    /// Linux counts one more stop to wait, and says it sleeps, which a spin without end never would. The thread is the
+    /// seventieth of a grid, which no other test of this file starts.
     #[test]
-    fn a_thread_started_for_a_placed_grid_sleeps_until_it_is_told_and_then_spins() -> Result {
-        let (mut least_before, mut most_after) = (Duration::MAX, Duration::ZERO);
-        for t in 70..90 {
-            let worker = Worker::start(t, Some(0))?;
-            let name = format!("grid thread {t}");
-            let deadline = Instant::now() + Duration::from_secs(5);
-            let task = loop {
-                match task_named(&name) {
-                    Some(task) if asleep(&task) => break task,
-                    _ => {
-                        assert!(Instant::now() < deadline, "{name} does not sleep in 5 s");
-                        thread::sleep(SPIN);
-                    }
-                }
-            };
-            // Longer than a spin: a thread that spun would have used its `SPIN` by now.
-            thread::sleep(4 * SPIN);
-            let before = used(&task)?;
-            assert!(asleep(&task), "{name} does not sleep, though it has not been told");
-            least_before = least_before.min(before);
-            worker.jobs.send(None)?;
-            thread::sleep(4 * SPIN);
-            while !asleep(&task) {
-                assert!(Instant::now() < deadline, "{name} does not sleep in 5 s after it spun");
-                thread::sleep(SPIN);
-            }
-            most_after = most_after.max(used(&task)? - before);
-        }
-        assert!(least_before < SPIN / 2, "no thread slept as it started: the least CPU one used was {least_before:?}");
-        assert!(most_after > SPIN / 2, "no thread spun when told: the most CPU one used was {most_after:?}");
-        Ok(())
+    fn a_thread_started_for_a_placed_grid_sleeps_until_it_is_told_and_after_its_spin() -> Result {
+        let worker = Worker::start(70, Some(0))?;
+        let name = "grid thread 70";
+        let mut task = None;
+        until(&format!("{name} asleep"), || {
+            task = task_named(name);
+            task.as_deref().map_or(Ok(false), asleep)
+        })?;
+        let task = task.ok_or("task_named gave None")?;
+        let before = stops(&task)?;
+        worker.jobs.send(None)?;
+        until(&format!("{name} asleep again, once told"), || Ok(stops(&task)? > before && asleep(&task)?))
     }
 
     /// A kept thread placed on `at`, as `rest` reads one: its CPU and its flag. A `Worker` holds
@@ -1164,12 +1107,12 @@ mod tests {
     }
 
     /// Runs `test` on a thread of its own, where it makes the kept threads it needs by hand, and says `waited` if it
-    /// does not end in a minute: a launch that waits for a thread that never comes fails the test, and does not hang
-    /// it. The thread it leaves behind ends with the process.
+    /// does not end in `HANG`, as in a hang: a launch that waits for a thread that never comes fails the test, and does
+    /// not hang it. The thread it leaves behind ends with the process.
     fn within<T: Send + 'static>(waited: &str, test: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
         let (said, heard) = mpsc::channel();
         thread::spawn(move || _ = said.send(test()));
-        heard.recv_timeout(Duration::from_secs(60)).map_err(|_| waited)?
+        heard.recv_timeout(HANG).map_err(|_| format!("{waited}: not in {HANG:?}, a hang"))?
     }
 
     /// A kept thread that never takes its launch holds a launch of blocks back by nothing: the caller runs each block,
@@ -1269,8 +1212,8 @@ mod tests {
     /// A kept thread that comes to a launch of blocks after it has ended runs no block of it, and lets go of it. Two
     /// launches of 1000 blocks, back to back: the caller runs the first, since the thread, a thread of the test's, does
     /// not come until the second has begun. The first block of the second launch opens the way, and waits until the
-    /// thread has run a block of that launch, for ten seconds at most. Each block of each launch ran once, while its
-    /// launch ran; the thread ran none of the first launch, and some of the second.
+    /// thread has run a block of that launch. Each block of each launch ran once, while its launch ran; the thread ran
+    /// none of the first launch, and some of the second.
     #[test]
     fn a_thread_that_comes_late_runs_no_block_of_a_launch_that_has_ended() -> Result {
         if most()? < 2 {
@@ -1290,10 +1233,10 @@ mod tests {
         let late_id = late.thread().id();
         // What each block of each launch saw: the launch, the block, who ran it, and whether the launch ran.
         let live = Arc::new([AtomicBool::new(false), AtomicBool::new(false)]);
-        let seen = Arc::new(Mutex::new(vec![]));
+        let (seen, waited) = (Arc::new(Mutex::new(vec![])), Arc::new(Mutex::new(None)));
         for first in [true, false] {
             let which = usize::from(!first);
-            let (live, seen, open) = (Arc::clone(&live), Arc::clone(&seen), open.clone());
+            let (live, seen, open, waits) = (Arc::clone(&live), Arc::clone(&seen), open.clone(), Arc::clone(&waited));
             live[which].store(true, Relaxed);
             let kernel = {
                 let live = Arc::clone(&live);
@@ -1310,12 +1253,10 @@ mod tests {
                         let _ = open.send(());
                         let late_ran = || {
                             let seen = seen.lock().unwrap_or_else(PoisonError::into_inner);
-                            seen.iter().any(|seen| seen.0 == 1 && seen.2 == late_id)
+                            Ok(seen.iter().any(|seen| seen.0 == 1 && seen.2 == late_id))
                         };
-                        let give_up = Instant::now() + Duration::from_secs(10);
-                        while !late_ran() && Instant::now() < give_up {
-                            thread::yield_now();
-                        }
+                        let ran = until("the late thread runs a block of the second launch", late_ran);
+                        *waits.lock().unwrap_or_else(PoisonError::into_inner) = Some(ran.map_err(|e| e.to_string()));
                     }
                 }
             };
@@ -1334,10 +1275,7 @@ mod tests {
             seen.iter().all(|seen| seen.0 == 1 || seen.2 != late_id),
             "the late thread ran a block of the first launch"
         );
-        assert!(
-            seen.iter().any(|seen| seen.0 == 1 && seen.2 == late_id),
-            "the late thread ran no block of the second launch"
-        );
+        assert_eq!(*waited.lock().unwrap_or_else(PoisonError::into_inner), Some(Ok(())));
         Ok(())
     }
 
@@ -1386,9 +1324,10 @@ mod tests {
     }
 
     /// A panic in the drop of a kernel on a kept thread ends nothing of the thread: it goes on to the next launch, and
-    /// runs some of the blocks of the launches after it, each of which runs each of its blocks once, before it returns,
+    /// runs some of the blocks of each launch after it, each of which runs each of its blocks once, before it returns,
     /// as when no kernel panics. The thread comes late to a launch of two blocks that the caller has ended, as the test
-    /// holds it back, and drops the kernel, as the last to hold it, which panics there.
+    /// holds it back, and drops the kernel, as the last to hold it, which panics there. In each launch after, the
+    /// blocks the caller runs wait until the thread has begun one.
     #[test]
     fn a_panic_in_the_drop_of_a_kernel_on_a_kept_thread_ends_nothing_of_the_thread() -> Result {
         if most()? < 2 {
@@ -1415,23 +1354,27 @@ mod tests {
             let (outbox, rest) = (mpsc::channel().0, AtomicU64::new(0));
             serve(1, &inbox, &outbox, &rest, false);
         })?;
-        said.recv_timeout(Duration::from_secs(10))?;
-        // The caller takes blocks as the kept thread does, and could run all of each launch alone: so the blocks that
-        // run on the late thread are counted, for the thread not to take each launch and run none of it.
-        let by_late = Arc::new(AtomicU64::new(0));
-        for _ in 0..20 {
-            let ran = Arc::new(AtomicU64::new(0));
-            let (into, late_into) = (Arc::clone(&ran), Arc::clone(&by_late));
+        said.recv_timeout(HANG)
+            .map_err(|_| format!("the kernel not dropped on the late thread in {HANG:?}, a hang"))?;
+        for launches in 0..3 {
+            // The caller takes blocks as the kept thread does, and could run each launch alone, if it did not wait.
+            let (ran, by_late) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+            let waited: Arc<Mutex<Vec<Result<(), String>>>> = Arc::default();
+            let (into, late_into, waits) = (Arc::clone(&ran), Arc::clone(&by_late), Arc::clone(&waited));
             launch_blocks(Grid::new(2), 50, move |_| {
-                thread::sleep(Duration::from_millis(1));
-                into.fetch_add(1, Relaxed);
                 if thread::current().name() == Some("late") {
-                    late_into.fetch_add(1, Relaxed);
+                    late_into.fetch_add(1, AcqRel);
+                } else {
+                    let came = until("the late thread begins a block", || Ok(late_into.load(Acquire) > 0));
+                    waits.lock().unwrap_or_else(PoisonError::into_inner).push(came.map_err(|e| e.to_string()));
                 }
+                into.fetch_add(1, Relaxed);
             })?;
-            assert_eq!(ran.load(Relaxed), 50, "blocks that had run when the launch returned");
+            assert_eq!(ran.load(Relaxed), 50, "launch {launches}: blocks that had run when it returned");
+            assert!(by_late.load(Acquire) > 0, "launch {launches}: the late thread ran no block");
+            let waited = waited.lock().unwrap_or_else(PoisonError::into_inner);
+            assert!(waited.iter().all(std::result::Result::is_ok), "launch {launches}: {waited:?}");
         }
-        assert!(by_late.load(Relaxed) > 0, "the late thread ran no block of the launches after");
         assert!(!late.is_finished(), "the thread ended");
         // The thread ends when its team does.
         super::KEPT.take();
@@ -1439,21 +1382,79 @@ mod tests {
         Ok(())
     }
 
-    /// A launch that moves two threads ends the spins it must in time that grows as the grid's
-    /// threads do, not as their square. The team is 1023 threads on CPUs 1 to 1023, but for threads
-    /// 1 and 2, which are on each other's. A launch of 256 threads puts them back, and so does one
-    /// of 1024: each ends the spin of those two threads, and of no other.
+    /// A launch that moves two threads ends the spins of the kept threads on the CPUs they move to, and of no other.
+    /// The team is 7 threads on CPUs 1 to 7, but for threads 1 and 2, which are on each other's, and a launch of 8 puts
+    /// them back.
     #[test]
-    fn a_launch_that_moves_threads_ends_the_spins_in_time_that_grows_as_the_threads_do() -> Result {
-        let on: Vec<usize> = (0..1024).collect();
+    fn a_launch_that_moves_two_threads_ends_the_spins_of_the_threads_on_their_cpus_alone() {
+        let on: Vec<usize> = (0..8).collect();
         let mut before = on.clone();
         before.swap(1, 2);
         let team: Vec<Worker> = before[1..].iter().map(|&cpu| placed(cpu)).collect();
-        assert_grows_as_threads_do("the end of the spins", |threads| {
-            rest(&team[..threads - 1], Some(0), &on[..threads], 1);
-        })?;
+        rest(&team, Some(0), &on, 1);
         let ended: Vec<usize> = (0..team.len()).filter(|&i| team[i].rest.load(Relaxed) == 1).collect();
         assert_eq!(ended, [0, 1]);
+    }
+
+    /// A kept thread that takes a launch of blocks late, after a launch with a later number has told it to rest, as one
+    /// that moves threads does, sleeps once it has let go of it, and does not spin for it, though its grid says to spin
+    /// without end: a thread that spun would never sleep. The thread, a thread of the test's, comes to the launch once
+    /// the caller has run each block of it, and the launch has returned.
+    #[test]
+    fn a_thread_told_to_rest_that_takes_a_launch_of_blocks_late_sleeps_once_it_lets_go_of_it() -> Result {
+        if most()? < 2 {
+            eprintln!("the process runs one thread at once: skipped");
+            return Ok(());
+        }
+        let (team, mut held) = fakes(1);
+        let resting = Arc::clone(&team.first().ok_or("first gave None")?.rest);
+        super::KEPT.set(team);
+        let Held { inbox, _answers } = held.pop().ok_or("pop gave None")?;
+        launch_blocks(Grid::new(2).spin(Duration::MAX), 2, |_| {})?;
+        resting.store(super::LAUNCHES.get() + 1, Relaxed);
+        let (said, heard) = mpsc::channel();
+        let late = thread::spawn(move || {
+            _ = said.send(me().map_err(|e| e.to_string()));
+            let outbox = mpsc::channel().0;
+            serve(1, &inbox, &outbox, &resting, false);
+        });
+        let task = heard.recv()??;
+        until("the late thread asleep, once it has let go of the launch", || asleep(&task))?;
+        // The thread ends when its team does.
+        super::KEPT.take();
+        late.join().map_err(|_| "the late thread panicked")?;
+        Ok(())
+    }
+
+    /// No kept thread says how a launch of blocks ended, as the caller waits for its blocks and not for the threads: an
+    /// answer left in a thread's channel would be the next launch of threads', which would take it for that thread's,
+    /// and return before the thread had run. Each thread takes one of as many blocks as the grid has threads, as each
+    /// block waits until all have begun; once each kept thread sleeps, its spin of none over, no answer waits.
+    #[test]
+    fn a_launch_of_blocks_leaves_no_answer_for_the_launch_after_it() -> Result {
+        let threads = most()?.min(3);
+        let caller = thread::current().id();
+        let (began, tasks) = (Arc::new(AtomicU64::new(0)), Arc::new(Mutex::new(vec![])));
+        let into = Arc::clone(&tasks);
+        launch_blocks(Grid::new(threads).spin(Duration::ZERO), threads as u64, move |_| {
+            began.fetch_add(1, AcqRel);
+            let all = until("all the blocks begun", || Ok(began.load(Acquire) >= threads as u64));
+            if thread::current().id() != caller {
+                into.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(all.and_then(|()| me()).map_err(|e| e.to_string()));
+            }
+        })?;
+        let tasks = tasks.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        assert_eq!(tasks.len(), threads - 1, "blocks run by the kept threads");
+        for task in tasks {
+            let task = task?;
+            until(&format!("{} asleep", task.display()), || asleep(&task))?;
+        }
+        let answers = super::KEPT.with_borrow(|team| {
+            team.iter().filter(|worker| !matches!(worker.done.try_recv(), Err(mpsc::TryRecvError::Empty))).count()
+        });
+        assert_eq!(answers, 0, "answers waiting from the kept threads");
         Ok(())
     }
 

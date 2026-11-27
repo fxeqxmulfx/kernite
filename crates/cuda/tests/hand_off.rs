@@ -2,42 +2,41 @@
 //! `unsafe` `host_now` and `host_now_mut`, which wait for nothing, where `host` and `host_mut` wait for every kernel.
 //! A kernel and the host hand over a job and its answer, as an engine's decode hands the work of a layer to the CPU:
 //! the kernel writes the job, then a number by `st.release.sys`, and spins for the answer by `ld.acquire.sys` and
-//! `nanosleep`, up to a time on the GPU's clock, which `clock_start` of `gpu` starts; the host loads the number, reads
-//! the job, writes the answer and stores an ack. It is so in each kind of unified memory: page-locked, managed, a slice
-//! lent and a slice registered. A kernel that loads a word again and again, while the host stores two values to it by
-//! turns, loads one of the two each time. The tests go one at a time, as `gpu::cuda` sees to.
+//! `nanosleep`, giving up only in a hang; the host loads the number, reads the job, writes the answer and stores an
+//! ack. It is so in each kind of unified memory: page-locked, managed, a slice lent and a slice registered. A kernel
+//! that loads a word again and again, while the host stores two values to it by turns, loads one of the two each time.
+//! The tests go one at a time, as `gpu::cuda` sees to.
 
-use std::hint;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
 
 use kernite_cuda::{Cuda, Module, Plain, Unified, arg};
 
 mod common;
 mod gpu;
 use common::{NO_PAGEABLE, managed_or_skip, or_skip, register_or_skip};
-use gpu::{COPIES, SEEN, SETS, TIMED_OUT, cuda, hold, launch, peek, poke, ptx_for, run};
+use gpu::{COPIES, HANG, SEEN, cuda, hold, launch, peek, poke, ptx_for, release_while, run, until};
 
 type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
 /// The kernels. `hands_off`: one thread writes the 1024 floats `i * 0.5` to `job`, then `SEQ` to the word after them by
-/// `st.release.sys`; it spins on the word `ack` by `ld.acquire.sys`, with a `nanosleep` between, until it is not 0 or
-/// `nanos` nanoseconds have gone by; and it writes `SEEN` to `out`, by `st.release.sys`, if it saw the ack, and
-/// `TIMED_OUT` if the time went by first. `reads_again`: one thread loads the word `words[0]` by `ld.global.cv.u32`,
-/// `n` times, which is to fetch it again each time, and writes each load to `loads`; then it writes 1 to `words[1]` by
-/// `st.release.sys`.
+/// `st.release.sys`; it looks at the word `ack` by `ld.acquire.sys`, with a `nanosleep` between, until it is not 0,
+/// `looks` times at most; and it writes `SEEN` to `out`, by `st.release.sys`, if it saw the ack, and `NOT_SEEN` if not.
+/// `reads_again(words, first, second, n, looks)`: one thread loads the word `words[0]` by `ld.global.cv.u32`, which is
+/// to fetch it again each time, `n` times and on until it has loaded both `first` and `second`, `looks` times at most;
+/// a load that is neither ends it at once, and it writes that load to `words[3]`. Then it writes to `words[2]` which of
+/// the two it loaded, bit 1 for `first` and bit 2 for `second`, and 1 to `words[1]` by `st.release.sys`.
 const PTX: &str = "
-.visible .entry hands_off(.param .u64 job_param, .param .u64 ack_param, .param .u64 out_param, .param .u64 nanos_param)
+.visible .entry hands_off(.param .u64 job_param, .param .u64 ack_param, .param .u64 out_param, .param .u64 looks_param)
 {
-	.reg .u64 %job, %ack, %out, %nanos, %at, %start, %now, %gone;
+	.reg .u64 %job, %ack, %out, %looks, %at;
 	.reg .u32 %i, %word;
 	.reg .f32 %x;
-	.reg .pred %more, %set, %early;
+	.reg .pred %more, %set, %over;
 
 	ld.param.u64 %job, [job_param];
 	ld.param.u64 %ack, [ack_param];
 	ld.param.u64 %out, [out_param];
-	ld.param.u64 %nanos, [nanos_param];
+	ld.param.u64 %looks, [looks_param];
 	cvta.to.global.u64 %job, %job;
 	cvta.to.global.u64 %ack, %ack;
 	cvta.to.global.u64 %out, %out;
@@ -53,47 +52,66 @@ WRITE:
 	@%more bra WRITE;
 	mov.u32 %word, 7;
 	st.release.sys.global.u32 [%job+4096], %word;
-	call (%start), clock_start, ();
 WAIT:
+	setp.eq.u64 %over, %looks, 0;
+	@%over bra NOT_SEEN;
+	sub.u64 %looks, %looks, 1;
 	ld.acquire.sys.global.u32 %word, [%ack];
 	setp.ne.u32 %set, %word, 0;
 	@%set bra SAW;
-	mov.u64 %now, %globaltimer;
-	sub.u64 %gone, %now, %start;
-	setp.lt.u64 %early, %gone, %nanos;
-	@!%early bra LATE;
 	nanosleep.u32 200;
 	bra WAIT;
 SAW:
 	mov.u32 %word, 1;
 	st.release.sys.global.u32 [%out], %word;
 	ret;
-LATE:
+NOT_SEEN:
 	mov.u32 %word, 2;
 	st.release.sys.global.u32 [%out], %word;
 	ret;
 }
 
-.visible .entry reads_again(.param .u64 words_param, .param .u64 loads_param, .param .u32 n_param)
+.visible .entry reads_again(
+	.param .u64 words_param,
+	.param .u32 first_param,
+	.param .u32 second_param,
+	.param .u32 n_param,
+	.param .u64 looks_param
+)
 {
-	.reg .u64 %words, %loads, %at;
-	.reg .u32 %n, %i, %value, %done;
-	.reg .pred %more;
+	.reg .u64 %words, %looks;
+	.reg .u32 %first, %second, %n, %i, %value, %bit, %loaded, %done;
+	.reg .pred %over, %is_first, %is_second, %either, %more;
 
 	ld.param.u64 %words, [words_param];
-	ld.param.u64 %loads, [loads_param];
+	ld.param.u32 %first, [first_param];
+	ld.param.u32 %second, [second_param];
 	ld.param.u32 %n, [n_param];
+	ld.param.u64 %looks, [looks_param];
 	cvta.to.global.u64 %words, %words;
-	cvta.to.global.u64 %loads, %loads;
 	mov.u32 %i, 0;
+	mov.u32 %loaded, 0;
 LOAD:
+	setp.eq.u64 %over, %looks, 0;
+	@%over bra DONE;
+	sub.u64 %looks, %looks, 1;
 	ld.global.cv.u32 %value, [%words];
-	mul.wide.u32 %at, %i, 4;
-	add.u64 %at, %loads, %at;
-	st.global.u32 [%at], %value;
+	setp.eq.u32 %is_first, %value, %first;
+	setp.eq.u32 %is_second, %value, %second;
+	or.pred %either, %is_first, %is_second;
+	@!%either bra STRAY;
+	selp.u32 %bit, 1, 2, %is_first;
+	or.b32 %loaded, %loaded, %bit;
 	add.u32 %i, %i, 1;
 	setp.lt.u32 %more, %i, %n;
 	@%more bra LOAD;
+	setp.ne.u32 %more, %loaded, 3;
+	@%more bra LOAD;
+	bra DONE;
+STRAY:
+	st.global.u32 [%words+12], %value;
+DONE:
+	st.global.u32 [%words+8], %loaded;
 	mov.u32 %done, 1;
 	st.release.sys.global.u32 [%words+4], %done;
 	ret;
@@ -108,16 +126,15 @@ const READS_AGAIN: usize = 1;
 const FLOATS: usize = 1024;
 const SEQ: u32 = 7;
 
-/// How many loads `reads_again` makes, and the two words that the host stores by turns while it does. The second has
-/// no bit the first has, so a load of a mix of the two is neither.
-const LOADS: usize = 20_000;
+/// How many loads `reads_again` makes at least, and the two words that the host stores by turns while it does. The
+/// second has no bit the first has, so a load of a mix of the two is neither, and neither has a byte of 0, so no mix of
+/// them is 0.
+const LOADS: u32 = 20_000;
 const FIRST: u32 = 0x0123_4567;
 const SECOND: u32 = !FIRST;
 
-/// How long `hands_off` waits for the ack where the host gives it: five seconds, much more than the host takes. And
-/// where the host cannot, as it waits in `host()` for the kernel: a third of a second, which is spent.
-const FOR_THE_HOST: u64 = 5_000_000_000;
-const A_THIRD: u64 = 333_000_000;
+/// What `reads_again` writes where it loaded both words.
+const BOTH: u32 = 0b11;
 
 /// The module: `hands_off` and, for the later kernel and for the tests that hold one back, the kernels of `gpu`, which
 /// the module of `PTX` has its own `clock_start` beside. Or a line that says the GPU is too old for `ld.acquire`.
@@ -169,14 +186,14 @@ fn bits(floats: &[f32]) -> Vec<u32> {
     floats.iter().map(|x| x.to_bits()).collect()
 }
 
-/// `hands_off` launched on the null stream with its job, ack and out, and the time it waits for the ack.
-fn start(hands: &Module, job: &Unified<'_, f32>, ack: &Unified<'_, u32>, out: &Unified<'_, u32>, nanos: u64) -> Result {
-    launch(hands, HANDS_OFF, &[arg(&job.ptr()), arg(&ack.ptr()), arg(&out.ptr()), arg(&nanos)])
+/// `hands_off` launched on the null stream with its job, ack and out. It looks for the ack until a hang.
+fn start(hands: &Module, job: &Unified<'_, f32>, ack: &Unified<'_, u32>, out: &Unified<'_, u32>) -> Result {
+    launch(hands, HANDS_OFF, &[arg(&job.ptr()), arg(&ack.ptr()), arg(&out.ptr()), arg(&HANG)])
 }
 
 /// The kernel and the host hand over a job and its answer, in memory of `kind`: the host sees the number by `atomics`,
 /// reads the floats the kernel wrote by `host_now`, writes their sum by `host_now_mut` into other memory and stores the
-/// ack, and the kernel sees the ack before its time is up. A kernel launched after reads the sum.
+/// ack, and the kernel sees the ack. A kernel launched after reads the sum.
 fn hand_over(kind: Kind) -> Result {
     let Some((cuda, _alone)) = cuda() else { return Ok(()) };
     if !makes(&cuda, kind)? {
@@ -188,15 +205,11 @@ fn hand_over(kind: Kind) -> Result {
     let (mut sum, after) = (memory::<f32>(&cuda, kind, 1)?, memory::<f32>(&cuda, kind, 1)?);
     // Memory that the GPU zeroes, which is managed memory, is zero when the work after the zeros runs.
     cuda.sync()?;
-    start(&hands, &job, &ack, &out, FOR_THE_HOST)?;
+    start(&hands, &job, &ack, &out)?;
     // The kernel runs now, and waits for the ack. The host waits for the number by loads of an atomic, which is no
-    // wait for the GPU: `host()` here would wait for the kernel, and so for its time to be up.
+    // wait for the GPU: `host()` here would wait for the kernel, which waits for the ack, until a hang.
     let number = job.atomics().last().ok_or("a job has no word for the number")?;
-    let started = Instant::now();
-    while number.load(Ordering::Acquire) != SEQ {
-        assert!(started.elapsed() < Duration::from_nanos(FOR_THE_HOST), "the kernel wrote no number in five seconds");
-        hint::spin_loop();
-    }
+    until("the kernel to write the number", || Ok(number.load(Ordering::Acquire) == SEQ))?;
     // SAFETY: the kernel wrote the floats before it stored the number by `st.release.sys`, which the host loaded by
     // `Acquire`, and it writes nothing to `job` after the number: it reads `ack` and writes `out`, other memory.
     let (_, floats) = unsafe { job.host_now() }.split_last().ok_or("a job has no word for the number")?;
@@ -210,7 +223,7 @@ fn hand_over(kind: Kind) -> Result {
         flag.store(1, Ordering::Release);
     }
     cuda.sync()?;
-    assert_eq!(out.host()?, [SEEN], "the kernel did not see the ack before its time was up");
+    assert_eq!(out.host()?, [SEEN], "the kernel did not see the ack");
     launch(&kernels, COPIES, &[arg(&sum.ptr()), arg(&after.ptr())])?;
     assert_eq!(bits(after.host()?), [total.to_bits()], "the kernel after read the sum the host wrote");
     Ok(())
@@ -237,35 +250,31 @@ fn a_slice_registered_is_handed_over_as_page_locked_memory_is() -> Result {
 }
 
 /// The host stores `FIRST` and `SECOND` by turns to a word, through `atomics`, while `reads_again` loads the word again
-/// and again, by plain loads of the word's size, and writes each load. The two race over the same four bytes, which
-/// PTX calls a uniform-size data-race, and each load is one of the two words: none is a mix of them. A race of accesses
-/// that overlap in part is a mixed-size one, which the axioms of PTX's memory model do not apply to.
+/// and again, by plain loads of the word's size, `LOADS` times and on until it has loaded both. The two race over the
+/// same four bytes, which PTX calls a uniform-size data-race, and each load is one of the two words: none is a mix of
+/// them. A race of accesses that overlap in part is a mixed-size one, which the axioms of PTX's memory model do not
+/// apply to.
 #[test]
 fn a_kernel_loads_one_of_two_words_that_the_host_stores_by_turns() -> Result {
     let Some((cuda, _alone)) = cuda() else { return Ok(()) };
     let Some((hands, _)) = load(&cuda)? else { return Ok(()) };
-    // The word that the host stores, and the word after it, where the kernel says that it is done.
-    let (mut words, loads) = (cuda.pinned::<u32>(2)?, cuda.pinned::<u32>(LOADS)?);
+    // The word that the host stores; the word after it, where the kernel says that it is done; which of the two the
+    // kernel loaded; and a load that was neither.
+    let mut words = cuda.pinned::<u32>(4)?;
     let at = words.ptr();
-    let [word, done] = words.atomics() else { return Err("two words have no two atomics".into()) };
+    let [word, done, ..] = words.atomics() else { return Err("four words have no four atomics".into()) };
     word.store(FIRST, Ordering::Relaxed);
-    launch(&hands, READS_AGAIN, &[arg(&at), arg(&loads.ptr()), arg(&(LOADS as u32))])?;
-    let (started, mut stores) = (Instant::now(), 0u32);
-    while done.load(Ordering::Acquire) == 0 {
-        assert!(started.elapsed() < Duration::from_nanos(FOR_THE_HOST), "the kernel was not done in five seconds");
-        word.store(if stores % 2 == 0 { SECOND } else { FIRST }, Ordering::Relaxed);
-        stores += 1;
-    }
-    let loaded = loads.host()?;
-    let stray = loaded.iter().find(|&&load| load != FIRST && load != SECOND);
-    assert_eq!(stray, None, "a load saw neither word: a mix of them, say");
-    let count = |of: u32| loaded.iter().filter(|&&load| load == of).count();
-    let (first, second) = (count(FIRST), count(SECOND));
-    assert!(
-        first > 0 && second > 0,
-        "the loads did not race with the stores: {first} saw one word, {second} the other"
-    );
-    eprintln!("{first} loads saw the first word, {second} the second, while the host stored {stores} times");
+    launch(&hands, READS_AGAIN, &[arg(&at), arg(&FIRST), arg(&SECOND), arg(&LOADS), arg(&HANG)])?;
+    // The second word is the first with its bits flipped, so each store flips the one before.
+    let mut next = SECOND;
+    until("the kernel to load both words", || {
+        word.store(next, Ordering::Relaxed);
+        next = !next;
+        Ok(done.load(Ordering::Acquire) != 0)
+    })?;
+    let &[_, _, loaded, stray] = words.host()? else { return Err("four words are not four".into()) };
+    assert_eq!(stray, 0, "a load saw neither word: a mix of them, say");
+    assert_eq!(loaded, BOTH, "the loads did not race with the stores, and the kernel gave up in a hang");
     Ok(())
 }
 
@@ -273,17 +282,13 @@ fn a_kernel_loads_one_of_two_words_that_the_host_stores_by_turns() -> Result {
 fn host_waits_for_the_kernel_to_be_done_where_atomics_do_not() -> Result {
     let Some((cuda, _alone)) = cuda() else { return Ok(()) };
     let Some((hands, _)) = load(&cuda)? else { return Ok(()) };
-    let (job, ack, out) = (cuda.pinned::<f32>(FLOATS + 1)?, cuda.pinned::<u32>(1)?, cuda.pinned::<u32>(1)?);
-    start(&hands, &job, &ack, &out, A_THIRD)?;
-    // `host()` waits for the kernel, which waits for an ack that the host cannot give until `host()` returns: the
-    // kernel's time goes by, and it writes that, and the number is there too.
-    let started = Instant::now();
-    let floats = job.host()?;
-    let waited = started.elapsed();
-    assert_eq!(out.host()?, [TIMED_OUT], "host() returned before the kernel's time was up");
-    assert_eq!(ack.host()?, [0]);
-    assert_eq!(floats[FLOATS].to_bits(), SEQ);
-    eprintln!("host() waited {waited:?} for a kernel that waited {:?}", Duration::from_nanos(A_THIRD));
+    let (job, mut ack, mut out) = (cuda.pinned::<f32>(FLOATS + 1)?, cuda.pinned::<u32>(1)?, cuda.pinned::<u32>(1)?);
+    start(&hands, &job, &ack, &out)?;
+    // `host()` waits for the kernel, which waits for an ack that the host gives while it is in `host()`: the kernel
+    // sees it, and writes that, and the number is there too.
+    let number = release_while(&mut ack, || job.host().map(|floats| floats[FLOATS].to_bits()))??;
+    assert_eq!(peek(&mut out), SEEN, "host() returned before the kernel was done");
+    assert_eq!(number, SEQ);
     Ok(())
 }
 
@@ -291,11 +296,11 @@ fn host_waits_for_the_kernel_to_be_done_where_atomics_do_not() -> Result {
 fn host_now_reads_what_one_stream_wrote_while_a_kernel_of_another_runs_and_host_waits_for_both() -> Result {
     let Some((cuda, _alone)) = cuda() else { return Ok(()) };
     let module = gpu::load(&cuda)?;
-    let (a, b, c) = (cuda.stream()?, cuda.stream()?, cuda.stream()?);
-    let (mut from, written, flag, mut out) =
+    let (a, b) = (cuda.stream()?, cuda.stream()?);
+    let (mut from, written, mut flag, mut out) =
         (cuda.pinned::<u32>(1)?, cuda.pinned::<u32>(1)?, cuda.pinned::<u32>(1)?, cuda.pinned::<u32>(1)?);
     poke(&mut from, 7);
-    // `copies` writes the word on `a`, and `waits` holds `b` until a flag is written, up to five seconds.
+    // `copies` writes the word on `a`, and `waits` holds `b` until a flag is written.
     run(&a, || launch(&module, COPIES, &[arg(&from.ptr()), arg(&written.ptr())]))?;
     run(&b, || hold(&module, flag.ptr(), out.ptr()))?;
     a.sync()?;
@@ -303,9 +308,9 @@ fn host_now_reads_what_one_stream_wrote_while_a_kernel_of_another_runs_and_host_
     // and `out`, and no part of `written`.
     assert_eq!(unsafe { written.host_now() }, [7], "host_now did not give what the copy of `a` wrote");
     assert_eq!(peek(&mut out), 0, "the kernel of `b` was done when host_now returned: it did not run beside it");
-    // `sets` on `c` writes the flag after a while, and `host()` waits for it, and for the kernel of `b` that saw it.
-    run(&c, || launch(&module, SETS, &[arg(&flag.ptr()), arg(&400_000_000u64)]))?;
-    assert_eq!(written.host()?, [7]);
+    // The host writes the flag while it is in `host()`, which waits for it, and for the kernel of `b` that saw it.
+    let read = release_while(&mut flag, || written.host().map(<[u32]>::to_vec))??;
+    assert_eq!(read, [7]);
     assert_eq!(peek(&mut out), SEEN, "host() returned before the kernel of `b` was done");
     Ok(())
 }

@@ -7,6 +7,18 @@ release gives it its version.
 
 ## Unreleased
 
+- kernite-cuda makes a stream apart, `cuda.stream_apart(urgent)`: its work and the null stream's do not wait for each
+  other, and an urgent one runs at the GPU's greatest priority.
+- kernite-cuda puts the granules of a buffer that grows and shrinks, from element `at` on, in the host's page-locked
+  memory at the same addresses, `unsafe { buffer.move_split(at) }`: the GPU's kernels reach them over the bus, and the
+  host reaches them too.
+- kernite-cuda copies and zeros at addresses that a program works out, `unsafe { cuda.copy_at(to, from, n) }`, and
+  `zero_at`, `write_at` and `read_at`; `Ptr::new(addr)` makes the pointer an `unsafe` launch takes.
+- kernite takes an idiom on one register as its first write, `vpxor(z, z, z)` say, as it takes `zero` and `ones`.
+- Breaks: kernite-cuda's `Memory::reach` gives a third value, how many of the elements are before a buffer's split, as
+  a copy over the split is made a side at a time: the driver ends the process on one over both sides from or to memory
+  the host reaches.
+
 ## 0.7.0 (2026-11-26)
 
 - kernite-cuda says how many bytes of a GPU's memory are free, and how many it has.

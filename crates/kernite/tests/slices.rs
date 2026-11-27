@@ -3,8 +3,6 @@
 //! proves the address inside the slice from the compares the kernel makes of an index with the length. What it cannot
 //! prove it refuses, at the operand, and the kernel is then an `unsafe fn`, which compiles as it always has.
 
-use std::time::{Duration, Instant};
-
 type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
 /// Kernel `k` of `src` as x86, the lines of its code, or the error.
@@ -805,24 +803,21 @@ fn a_slice_is_at_a_multiple_of_its_elements_bytes() -> Result {
     Ok(())
 }
 
-/// What the proof costs grows with the gprs a length or an index is related to, not with all that a kernel has: a
-/// kernel of a slice that adds up a thousand gprs, none of them an index, compiles safe in about the time it takes as
-/// an `unsafe fn`, within twenty times and a second, where a node for each gpr made it take minutes.
+/// A kernel of a slice that adds up a thousand gprs, none of them an index, is proved safe, and its code is that of
+/// the same kernel as an `unsafe fn`: the proof adds nothing to it. Without its compare it is refused, as the proof
+/// says. What the proof costs grows with the gprs a length or an index is related to, not with all that a kernel has,
+/// where a node for each gpr made it take minutes; a probe run alone measures it, as no test holds a time.
 #[test]
-fn a_safe_kernel_of_a_thousand_gprs_compiles_in_about_the_time_of_an_unsafe_one() -> Result {
+fn a_safe_kernel_of_a_thousand_gprs_is_proved_and_compiles_as_an_unsafe_one() -> Result {
     let mut lines: Vec<String> = ["let s: gpr;", "zero(s);"].map(String::from).into();
     for k in 0..1000 {
         lines.extend([format!("let t{k}: gpr;"), format!("mov(t{k}, {k});"), format!("add(s, t{k});")]);
     }
     lines.extend(["cmp(xs.len, 1);", "jb(done);", "vaddss(acc.xmm, acc.xmm, [xs]);", "label(done);"].map(String::from));
     let src = kernel("xs: &[f32]", &lines.iter().map(String::as_str).collect::<Vec<_>>());
-    let time = |src: &str| -> Result<Duration> {
-        let start = Instant::now();
-        code(src)?;
-        Ok(start.elapsed())
-    };
-    let unsafe_time = time(&trusted(&src))?;
-    let safe_time = time(&src)?;
-    assert!(safe_time < unsafe_time * 20 + Duration::from_secs(1), "safe {safe_time:?}, unsafe {unsafe_time:?}");
+    assert_eq!(code(&src)?, code(&trusted(&src))?);
+    // The proof ran: without its compare, the kernel is refused where it reaches `[xs]`.
+    let unguarded = src.replace("cmp(xs.len, 1);\njb(done);\n", "");
+    assert_eq!(error(&unguarded)?, cannot_keep(&at(&unguarded, "[xs]")?, "vaddss", "[xs]", "`xs.len` at 1 or more"));
     Ok(())
 }

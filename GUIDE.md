@@ -577,29 +577,32 @@ it. kernite holds each vector variable to how many of its low bits are the kerne
 with, and all 256 of any other; and then what each instruction that writes it makes of it. An instruction that reads
 more of it, on any way to the instruction, is an error at the instruction, which names the variable: `vmovups([p], x)`
 of an `f32` `x` reads 128 bits of it and `vmovups([p], x.ymm)` 256, where `vmovss([p], x)` reads its 32. The variable is
-whole once the kernel has written all of it, with `zero(x)`, a load, or an instruction that computes all of an xmm or a
-ymm, as `vaddps` does. A scalar instruction writes the float alone, and carries the rest of its first source to the same
-place of its result: `vaddss(y, x, z)` leaves `y` the bits of `x` past the float, where `vaddss(y, w, z)` makes all of
-`y` the kernel's own if `w` is. An instruction that carries bits does not read them, and its result is the kernel's own
-as far as every bit it carries is: a move of a whole register, `vmovaps(y, x)`; the logic of bits, `vandps(x, x, mask)`,
-with which Rust takes the absolute value of a float, and `vxorps(x, x, x)`, which carries the bits of `x` though it
-computes zero, where `zero(x)` writes all of it; a blend, `vblendps(y, x, z, 1)` by a number, which takes each lane from
-one source, and `vblendvps(y, x, z, m)` by a register, whose selector counts in whole lanes; and what a merge keeps: the
-rest of the first source of a scalar instruction, the half that `vmovhps`, `vmovlps` and `vmovhlps` keep, the lanes that
-`vinsertps`, `vpinsrd` and `vinsertf128` leave, the element of each half of its first source that `vunpcklpd` leaves in
-place, and of its second that `vunpckhpd` does, the last element of the second source of `vunpckhps`, and the lanes of
-its result that a gather's mask leaves out. An instruction that picks lanes by a number known now reads the lanes it
-picks and no more: `vextractps(g, x, 0)` and `vpshufd(y, x, 0)` read 32 bits of `x`, and `vdpps(y, x, z, 0x11)`, which
-multiplies the first lanes alone, 32 of each. One that takes part of each 128 bits reads as far as the last part it
-takes: `vunpcklps` and `vmovddup` the low 64 bits of each, and `vmovsldup` and `vpmuludq` the even lanes, so 64 and 96
-bits of an xmm, and 192 and 224 of a ymm. A function of the module is held to it as a kernel is. A call reads each
-argument as far as its callee takes it, 32 bits of an `f32` and 64 of an `f64`, so `call(r, scale, (x, n))` of an `f32`
-`x`, where `scale` takes an `f64`, is an error; at an address with no functions given, it reads a float as the float,
-and any other vector as the call names it, an xmm or all of a ymm, so `x.ymm` of a float is an error there. What a call
-gives back is the kernel's own as far as the call would read it as an argument: 32 or 64 bits of a float that its callee
-gives back, and at an address with no functions given, a float as the float, and any other vector as the call names it.
-`ret(v)` reads `v` as far as the kernel gives it back, 32 bits of an `f32` and 64 of an `f64`, so `ret(x)` of an `f32`
-`x`, where the kernel gives back an `f64`, is an error.
+whole once the kernel has written all of it, with `zero(x)`, a load, an instruction that computes all of an xmm or a
+ymm, as `vaddps` does, or an idiom on one register. An idiom on one register gives the same bits whatever the register
+holds, so it reads nothing of it and writes all of it, as `zero` and `ones` do, and may be the first to write a
+variable: zero from `xor` and `sub` of a gpr's 64 or 32 bits and itself, and from `vxorps`, `vxorpd`, `vpxor`, `vpsub`
+and `vpcmpgt` of a vector and itself; ones from `vpcmpeq`. A scalar instruction writes the float alone, and carries the
+rest of its first source to the same place of its result: `vaddss(y, x, z)` leaves `y` the bits of `x` past the float,
+where `vaddss(y, w, z)` makes all of `y` the kernel's own if `w` is. An instruction that carries bits does not read
+them, and its result is the kernel's own as far as every bit it carries is: a move of a whole register, `vmovaps(y, x)`;
+the logic of bits, `vandps(x, x, mask)`, with which Rust takes the absolute value of a float; a blend,
+`vblendps(y, x, z, 1)` by a number, which takes each lane from one source, and `vblendvps(y, x, z, m)` by a register,
+whose selector counts in whole lanes; and what a merge keeps: the rest of the first source of a scalar instruction, the
+half that `vmovhps`, `vmovlps` and `vmovhlps` keep, the lanes that `vinsertps`, `vpinsrd` and `vinsertf128` leave, the
+element of each half of its first source that `vunpcklpd` leaves in place, and of its second that `vunpckhpd` does, the
+last element of the second source of `vunpckhps`, and the lanes of its result that a gather's mask leaves out. An
+instruction that picks lanes by a number known now reads the lanes it picks and no more: `vextractps(g, x, 0)` and
+`vpshufd(y, x, 0)` read 32 bits of `x`, and `vdpps(y, x, z, 0x11)`, which multiplies the first lanes alone, 32 of each.
+One that takes part of each 128 bits reads as far as the last part it takes: `vunpcklps` and `vmovddup` the low 64 bits
+of each, and `vmovsldup` and `vpmuludq` the even lanes, so 64 and 96 bits of an xmm, and 192 and 224 of a ymm. A
+function of the module is held to it as a kernel is. A call reads each argument as far as its callee takes it, 32 bits
+of an `f32` and 64 of an `f64`, so `call(r, scale, (x, n))` of an `f32` `x`, where `scale` takes an `f64`, is an error;
+at an address with no functions given, it reads a float as the float, and any other vector as the call names it, an xmm
+or all of a ymm, so `x.ymm` of a float is an error there. What a call gives back is the kernel's own as far as the call
+would read it as an argument: 32 or 64 bits of a float that its callee gives back, and at an address with no functions
+given, a float as the float, and any other vector as the call names it. `ret(v)` reads `v` as far as the kernel gives it
+back, 32 bits of an `f32` and 64 of an `f64`, so `ret(x)` of an `f32` `x`, where the kernel gives back an `f64`, is an
+error.
 
 Stack memory a kernel declares is a variable, as a GPU kernel's local memory is: `let tables: local<[u32; 1024], 32>;`
 is 4 KB of its frame at a multiple of 32, reached by its name, `mov(c.r32, [tables + b * 4])`, and `lea(p, [tables])`
@@ -1101,6 +1104,23 @@ to those elements is not used again. The zeros that `grow` writes to the element
 for them. Dropping the buffer waits for the kernels, as dropping any buffer does, then unmaps its memory and frees its
 addresses.
 
+`unsafe { cache.move_split(at) }` puts the granules of a reserved buffer from element `at` on in the host's memory, and
+those before them on the GPU: the split, which `cache.split()` says, is the first element of a granule at `at` or past
+it. The host's memory is page-locked, at the buffer's addresses: the GPU's kernels reach it over the bus, and the host
+at the same addresses. A granule that changes sides moves with what it holds, one at a time toward the new split: its
+new memory is mapped at a granule of addresses that `reserve` reserves past the buffer's, the granule is copied there on
+the current stream, which the call waits for, and the new memory takes the place of the old. Where the driver refuses a
+step the split is that of the granules moved, and the granule keeps its memory. The granules that `grow` backs follow
+the split, and the zeros of each of the host's are written alone, as the driver refuses a zeroing over two of them, or
+over one and the GPU's memory. A copy over the split, by `read`, `write`, `copy_from` or `cuda.copy`, is made a side at
+a time, as the driver ends the process on one over both sides from or to memory the host reaches: page-locked memory, a
+slice of the host's, or the granules of a buffer in the host's memory. Not every GPU maps the host's memory at addresses
+it reserves, so where the split first puts a granule there, `move_split` asks the GPU, and says in these words where it
+cannot: `cuMemCreate: the GPU cannot map the host's memory at addresses it reserves: its
+CU_DEVICE_ATTRIBUTE_HOST_NUMA_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED is 0`. It is `unsafe` as `shrink` is: no work that is
+queued or running on the GPU may reach a granule that moves, but the work the current stream was given before, nor may
+the host.
+
 `cuda.stream()` is a stream of the GPU: a queue of work that the GPU runs in order, beside the work of other streams.
 The work of a GPU goes to its null stream unless the thread says another: a kernel is launched on the current stream of
 its GPU, and `unsafe { stream.run(|| ..) }` makes `stream` the current stream of its GPU on the thread for the closure.
@@ -1114,12 +1134,21 @@ a module, wait for the stream's work. The work of two streams does not wait for 
 GPU has room. `stream.sync()` waits for the work of that stream alone, and `cuda.sync()` for all of the GPU's. Dropping
 a stream destroys it, and the work it holds runs on.
 
+`cuda.stream_apart(urgent)` is a stream apart: its work and the null stream's do not wait for each other, and run at
+once where the GPU has room, as two streams' do. So `read`, `write` and `copy_from` do not wait for its work, nor do the
+zeros and the copies made outside a `run` of it, and an event recorded on the null stream does not stand for its work.
+`cuda.sync()`, `host()` and `host_mut()` wait for all of the GPU's work, and so for its. An urgent stream apart has the
+GPU's greatest priority: where the kernels of several streams wait for room, the GPU starts the urgent stream's first.
+It stops no kernel that runs, and its copies are not hastened.
+
 `run` is `unsafe`, as kernite cannot see what the work of two streams reaches. Until the work that the closure launches
 is done, work of another stream that may run beside it must write no memory that it reaches, and reach none that it
-writes; the null stream's work, and `sync`, order the two. Each call in the closure is as safe as it is on the null
-stream. A launch asks the driver for `cuLaunchKernel` alone, whichever stream is current: kernite finds the current
-stream in a thread-local, which needs no call to the driver. That thread-local has no destructor, so a launch finds it
-as a thread ends too, in the destructor of another thread-local.
+writes; the null stream's work, and `sync`, order the two. The null stream's work does not order a stream apart's: its
+`sync`, an event and `cuda.sync()` do, and the memory its work reaches, and the module of its kernels, are dropped once
+that work is done. Each call in the closure is as safe as it is on the null stream. A launch asks the driver for
+`cuLaunchKernel` alone, whichever stream is current: kernite finds the current stream in a thread-local, which needs no
+call to the driver. That thread-local has no destructor, so a launch finds it as a thread ends too, in the destructor of
+another thread-local.
 
 `cuda.event()` is an event of the GPU: a point in the work of a stream, which the GPU reaches when it has done the work
 before it. `event.record()` puts the event after the work that the current stream has been given so far, and does not
@@ -1129,10 +1158,10 @@ work, and the host does not wait: that is how one stream waits for another, a ke
 writes, say. A record again makes the event stand for the work given by then, and for that alone. A record after a
 `wait` does not change what the stream waits for: the `wait` was for the work the event stood for then. An event never
 recorded stands for no work: it is done, and nothing waits for it. An event recorded on the null stream stands for the
-work that every stream of the GPU was given before the record, as a stream is blocking. Dropping an event destroys it
-and does not wait: the work goes on, and a stream that was made to wait for it still waits. `record` and `wait` go to
-the current stream of the event's GPU, as a launch does. Each asks the driver for its own function and no other, and
-finds the current stream with no call to the driver.
+work that every stream of the GPU but a stream apart was given before the record, as a stream is blocking. Dropping an
+event destroys it and does not wait: the work goes on, and a stream that was made to wait for it still waits. `record`
+and `wait` go to the current stream of the event's GPU, as a launch does. Each asks the driver for its own function and
+no other, and finds the current stream with no call to the driver.
 
 `cuda.timed_event()` is an event that times too. `later.duration_since(&earlier)` is the time from when the GPU reached
 `earlier` to when it reached `later`, as its own clock says it, as a `Duration`. Both have been recorded, and the work
@@ -1336,6 +1365,17 @@ slice where it is, and whose copies are queued in order, as those of page-locked
 writes it after the call waits for the stream: `register` page-locks the slice where it is, and its copies are queued in
 order``. `read` and `write` copy the host's own slice, and wait. A zeroing of a slice that `lend` lent is queued in
 order, as that of any other memory is.
+
+A program that works its addresses out itself copies and zeros at them, through the `Ptr` that `Ptr::new(at)` makes of
+an address. `cuda.copy_at(to, from, len)` copies `len` elements from `from` to `to`, and `cuda.zero_at(at, len)` sets
+`len` elements to zero: each goes to the current stream, as `copy` and `zero` do. `cuda.write_at(to, data)` and
+`cuda.read_at(from, out)` copy the host's slice, and wait, as `write` and `read` do. kernite checks none of the
+addresses, so each call is `unsafe`, and its contract is this: each address is of as many elements of the GPU's memory,
+or of the host's that is page-locked, which last until the work is done; and no other work writes the elements until
+then, nor reads those that the call writes. The zeros are of one buffer, and of a buffer that `reserve` made, of its
+GPU's memory or of one granule of the host's, as `grow` writes them. A length of more bytes than there are addresses is
+refused, and the driver is not asked: `cuMemcpyAsync: 18446744073709551615 elements of 4 bytes are more bytes than there
+are addresses`.
 
 A pointer taken before the slice is `Copy`, and the compiler cannot refuse a launch on it, so the launch of a kernel
 that is an `unsafe fn`, which takes pointers, is `unsafe`, and its contract is this: each pointer is to a buffer or to
@@ -1689,7 +1729,8 @@ of the same kernel written with `unsafe`: kernite adds none to the kernel, and t
 
 What kernite cannot prove it refuses, at the first instruction or operand it cannot, and the error says what kernite
 cannot prove there, and that a kernel that does it is an `unsafe fn`, which compiles as it always has, and whose
-launcher takes pointers, `xs.ptr()`, and is `unsafe`. A kernel is an `unsafe fn` when it:
+launcher takes pointers, `xs.ptr()`, or `Ptr::new(at)` for an address `at` that the program works out, and is `unsafe`.
+A kernel is an `unsafe fn` when it:
 
 - writes at an address that is not only its thread's, `[y + (i + 1) * 4]`, or reads memory the kernel may write at one
   that is not, so that a thread may race with another;

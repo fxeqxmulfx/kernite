@@ -42,7 +42,9 @@
 //!
 //! [`Cuda::reserve`] makes a buffer that grows and shrinks at the same addresses: it reserves addresses for the
 //! elements it may have, [`Buffer::grow`] backs them with the GPU's memory, and [`Buffer::shrink`], which is `unsafe`,
-//! gives the memory back, a granule of the driver's at a time, 2 MiB on the GPU here.
+//! gives the memory back, a granule of the driver's at a time, 2 MiB on the GPU here. [`Buffer::move_split`], `unsafe`
+//! too, puts its granules from a split on in the host's memory, at the same addresses, where the GPU's kernels reach
+//! them over the bus.
 //!
 //! A buffer is the GPU's own memory, and the host reaches it by copies. [`Unified`] memory is
 //! reached by the host and by the GPU's kernels at one address, with no copy: [`Cuda::managed`]
@@ -59,11 +61,13 @@
 //! has room. All the work goes to the GPU's null stream, unless a thread makes another stream current for a closure,
 //! [`Stream::run`], which [`Cuda::stream`] makes: a launch goes to the current stream of its GPU on the thread, and so
 //! do a prefetch, a copy that does not wait, [`Cuda::copy`], and a zeroing: `zero`, and the zeros that [`Cuda::alloc`],
-//! [`Cuda::managed`], [`Buffer::grow`] and the load of a module write. A stream is blocking, so the copies and the
-//! drops that wait for the null stream's work wait for its work too. An [`Event`], which [`Cuda::event`] makes, is a
-//! point in the work of a stream: the host asks whether the work before it is done, or waits for it, and another
-//! stream waits for it with no wait of the host. [`Cuda::timed_event`] makes one that times work, and
-//! [`Event::duration_since`] says the time between two.
+//! [`Cuda::managed`], [`Buffer::grow`] and the load of a module write. So do [`Cuda::copy_at`] and [`Cuda::zero_at`],
+//! which copy and zero at addresses that a program works out, and are `unsafe`, as kernite checks none of them. A
+//! stream is blocking, so the copies and the drops that wait for the null stream's work wait for its work too.
+//! [`Cuda::stream_apart`] makes a stream apart, which is not, at the GPU's greatest priority where it is urgent. An
+//! [`Event`], which [`Cuda::event`] makes, is a point in the work of a stream: the host asks whether the work before it
+//! is done, or waits for it, and another stream waits for it with no wait of the host. [`Cuda::timed_event`] makes one
+//! that times work, and [`Event::duration_since`] says the time between two.
 //!
 //! A kernel whose blocks wait for each other is launched cooperatively,
 //! [`Module::launch_cooperative`]: every block of the grid runs at once, so there are at most
@@ -88,7 +92,7 @@ mod safe;
 mod stream;
 mod unified;
 
-use reserve::{Access, Properties, Reservation};
+use reserve::{Access, Properties, Reservation, pieces};
 use safe::bounds;
 
 pub use event::{Event, Timed, Untimed};
@@ -202,7 +206,8 @@ api! {
     can_access_peer = c"cuDeviceCanAccessPeer"(*mut c_int, c_int, c_int);
     enable_peer_access = c"cuCtxEnablePeerAccess"(Handle, c_uint);
     synchronize = c"cuCtxSynchronize"();
-    create_stream = c"cuStreamCreate"(*mut Handle, c_uint);
+    create_stream = c"cuStreamCreateWithPriority"(*mut Handle, c_uint, c_int);
+    priorities = c"cuCtxGetStreamPriorityRange"(*mut c_int, *mut c_int);
     destroy_stream = c"cuStreamDestroy_v2"(Handle);
     sync_stream = c"cuStreamSynchronize"(Handle);
     create_event = c"cuEventCreate"(*mut Handle, c_uint);
@@ -237,6 +242,7 @@ api! {
     map_memory = c"cuMemMap"(u64, usize, usize, u64, u64);
     set_access = c"cuMemSetAccess"(u64, usize, *const Access, usize);
     unmap_memory = c"cuMemUnmap"(u64, usize);
+    retain_memory = c"cuMemRetainAllocationHandle"(*mut u64, *mut c_void);
     range_attribute = c"cuMemRangeGetAttribute"(*mut c_void, usize, c_int, u64, usize);
     load_module = c"cuModuleLoadDataEx"(*mut Handle, *const c_void, c_uint, *mut c_int, *mut *mut c_void);
     unload_module = c"cuModuleUnload"(Handle);
@@ -463,22 +469,33 @@ impl Driver {
         api.check("cuCtxSynchronize", unsafe { (api.synchronize)() })
     }
 
-    /// Copies `data` to the GPU at `ptr`, after the kernels launched before have run.
-    fn write<T: Plain>(&self, ptr: u64, data: &[T]) -> Result<(), Error> {
+    /// Copies `data` to the GPU at `ptr`, after the kernels launched before have run: its first `cut` elements, those
+    /// before a buffer's split, apart from the rest, as [`pieces`] cuts it.
+    fn write<T: Plain>(&self, ptr: u64, data: &[T], cut: usize) -> Result<(), Error> {
         let api = self.current()?;
-        // SAFETY: it reads as many bytes from `data` as it has.
-        let copied = unsafe { (api.to_device)(ptr, data.as_ptr().cast(), size_of_val(data)) };
-        api.check("cuMemcpyHtoD", copied)
+        pieces(data.len(), [cut; 2], |first, n| {
+            // SAFETY: it reads the `n` elements of `data` from element `first` on, which it has.
+            let copied = unsafe {
+                let from = data.as_ptr().add(first).cast();
+                (api.to_device)(ptr + (first * size_of::<T>()) as u64, from, n * size_of::<T>())
+            };
+            api.check("cuMemcpyHtoD", copied)
+        })
     }
 
-    /// Copies what the GPU holds at `ptr` to `out`, after the kernels launched before have
-    /// run.
-    fn read_into<T: Plain>(&self, ptr: u64, out: &mut [T]) -> Result<(), Error> {
+    /// Copies what the GPU holds at `ptr` to `out`, after the kernels launched before have run: its first `cut`
+    /// elements, those before a buffer's split, apart from the rest, as [`pieces`] cuts it.
+    fn read_into<T: Plain>(&self, ptr: u64, out: &mut [T], cut: usize) -> Result<(), Error> {
         let api = self.current()?;
-        // SAFETY: it writes as many bytes to `out` as it has, and any bits are a `T`, as
-        // `Plain` promises.
-        let copied = unsafe { (api.to_host)(out.as_mut_ptr().cast(), ptr, size_of_val(out)) };
-        api.check("cuMemcpyDtoH", copied)
+        pieces(out.len(), [cut; 2], |first, n| {
+            // SAFETY: it writes the `n` elements of `out` from element `first` on, which it has, and any bits are a
+            // `T`, as `Plain` promises.
+            let copied = unsafe {
+                let to = out.as_mut_ptr().add(first).cast();
+                (api.to_host)(to, ptr + (first * size_of::<T>()) as u64, n * size_of::<T>())
+            };
+            api.check("cuMemcpyDtoH", copied)
+        })
     }
 
     /// Sets the `bytes` bytes at `ptr` to zero, on the current stream: after the work that stream was given before,
@@ -850,7 +867,7 @@ impl<T: Plain> Buffer<T> {
     /// has not as many elements: `cuMemcpyHtoD: a buffer of 4 elements written with 2`.
     pub fn write(&mut self, data: &[T]) -> Result<(), Error> {
         same_len("cuMemcpyHtoD", "a buffer", self.len, "written with", data.len())?;
-        self.driver.write(self.ptr, data)
+        self.driver.write(self.ptr, data, self.split())
     }
 
     /// What it holds, after the kernels launched before have run.
@@ -864,13 +881,13 @@ impl<T: Plain> Buffer<T> {
     /// if `out` has not as many elements: `cuMemcpyDtoH: a buffer of 4 elements read into 2`.
     pub fn read_into(&self, out: &mut [T]) -> Result<(), Error> {
         same_len("cuMemcpyDtoH", "a buffer", self.len, "read into", out.len())?;
-        self.driver.read_into(self.ptr, out)
+        self.driver.read_into(self.ptr, out, self.split())
     }
 
     /// Sets every element to zero, on the current stream, after the work that stream was given before. It returns
     /// before the GPU has done it: `read`, `write` and [`Cuda::sync`] wait for it.
     pub fn zero(&mut self) -> Result<(), Error> {
-        self.driver.zero(self.ptr, self.len * size_of::<T>())
+        self.zero_bytes(0, self.len * size_of::<T>())
     }
 
     /// Copies what `from` holds to it, after the kernels launched before have run on the GPU of either, and before
@@ -880,7 +897,10 @@ impl<T: Plain> Buffer<T> {
     /// error if `from` has not as many elements: `cuMemcpyPeer: a buffer of 4 elements copied from one of 2`.
     pub fn copy_from(&mut self, from: &Buffer<T>) -> Result<(), Error> {
         same_len("cuMemcpyPeer", "a buffer", self.len, "copied from one of", from.len)?;
-        self.driver.copy_from(self.ptr, &from.driver, from.ptr, self.len * size_of::<T>())
+        pieces(self.len, [self.split(), from.split()], |first, n| {
+            let at = (first * size_of::<T>()) as u64;
+            self.driver.copy_from(self.ptr + at, &from.driver, from.ptr + at, n * size_of::<T>())
+        })
     }
 }
 
@@ -900,10 +920,10 @@ impl<T: Plain> fmt::Debug for Buffer<T> {
     }
 }
 
-/// An address on the GPU, of elements of `T`: what a kernel's `*const T` or `*mut T` is
-/// given. A [`Buffer`] gives it, and it points at something only while the buffer lasts. A kernel's
-/// pointer is to a type with a size, but `T` may have none: a kernel that is wrong in this is one
-/// error, at its type, and not a second, here.
+/// An address on the GPU, of elements of `T`: what a kernel's `*const T` or `*mut T` is given. A [`Buffer`] gives it,
+/// and it points at something only while the buffer lasts; [`Ptr::new`] makes it from an address a program works out.
+/// A kernel's pointer is to a type with a size, but `T` may have none: a kernel that is wrong in this is one error, at
+/// its type, and not a second, here.
 #[repr(transparent)]
 pub struct Ptr<T: ?Sized> {
     addr: u64,
@@ -918,7 +938,9 @@ impl<T: ?Sized> Ptr<T> {
 }
 
 impl<T> Ptr<T> {
-    fn new(addr: u64) -> Ptr<T> {
+    /// The address `addr`, as the GPU reckons it: one that a program works out from those its memory gives, say. It is
+    /// safe to make, as only an `unsafe` launch takes it, which says that the memory there is the kernel's.
+    pub fn new(addr: u64) -> Ptr<T> {
         Ptr { addr, of: PhantomData }
     }
 
@@ -1147,7 +1169,7 @@ impl Module {
                 })?;
                 // The variable is the module's `.u64` that its kernels read the address from.
                 let at = memory.ptr().addr().next_multiple_of(align as u64);
-                m.driver.write(ptr, &[at])?;
+                m.driver.write(ptr, &[at], 1)?;
                 m.outside.push(memory);
                 (ptr, bytes) = (at, size);
             }
@@ -1339,7 +1361,7 @@ impl<T: Plain> Global<'_, T> {
     /// has not as many elements: `cuMemcpyHtoD: a module's memory of 4 elements written with 2`.
     pub fn write(&self, data: &[T]) -> Result<(), Error> {
         same_len("cuMemcpyHtoD", "a module's memory", self.len, "written with", data.len())?;
-        self.module.driver.write(self.ptr, data)
+        self.module.driver.write(self.ptr, data, data.len())
     }
 
     /// What it holds, after the kernels launched before have run.
@@ -1354,7 +1376,7 @@ impl<T: Plain> Global<'_, T> {
     /// into 2`.
     pub fn read_into(&self, out: &mut [T]) -> Result<(), Error> {
         same_len("cuMemcpyDtoH", "a module's memory", self.len, "read into", out.len())?;
-        self.module.driver.read_into(self.ptr, out)
+        self.module.driver.read_into(self.ptr, out, out.len())
     }
 
     /// Sets every element to zero, on the current stream, after the work that stream was given before, and does not
@@ -1664,17 +1686,37 @@ mod tests {
         0
     }
 
-    /// The fake driver's `cuStreamCreate`: the streams are 0x100, 0x200 and so on, and it says the flags it is given,
-    /// and the context it works in. In the context 13 it is `CUDA_ERROR_INVALID_CONTEXT`.
-    pub(super) unsafe extern "C" fn create_stream(at: *mut Handle, flags: c_uint) -> CuResult {
+    /// The fake driver's `cuStreamCreateWithPriority`: the streams are 0x100, 0x200 and so on, and it says the flags
+    /// and the priority it is given, and the context it works in. In the context 13 it is `CUDA_ERROR_INVALID_CONTEXT`.
+    pub(super) unsafe extern "C" fn create_stream(at: *mut Handle, flags: c_uint, priority: c_int) -> CuResult {
         if WORKING_IN.get() == 13 {
             return 201;
         }
         STREAMS_MADE.set(STREAMS_MADE.get() + 1);
         let stream = STREAMS_MADE.get() * 0x100;
-        ask(format!("create {stream:#x} with flags {flags} in {}", WORKING_IN.get()));
+        ask(format!("create {stream:#x} with flags {flags} at {priority} in {}", WORKING_IN.get()));
         // SAFETY: the caller gives a place for the stream.
         unsafe { *at = ptr::without_provenance_mut(stream) };
+        0
+    }
+
+    /// The fake driver's `cuCtxGetStreamPriorityRange`: the priorities of the fake GPU are 0, the least, to -5, the
+    /// greatest, and it writes those it is given a place for. It says the context it works in. In the context 13 it is
+    /// `CUDA_ERROR_INVALID_CONTEXT`.
+    unsafe extern "C" fn priorities(least: *mut c_int, greatest: *mut c_int) -> CuResult {
+        if WORKING_IN.get() == 13 {
+            return 201;
+        }
+        ask(format!("ask the priorities in {}", WORKING_IN.get()));
+        // SAFETY: the caller gives a place for each value it asks, and a null pointer for the others.
+        unsafe {
+            if let Some(least) = least.as_mut() {
+                *least = 0;
+            }
+            if let Some(greatest) = greatest.as_mut() {
+                *greatest = -5;
+            }
+        }
         0
     }
 
@@ -1890,6 +1932,14 @@ mod tests {
         if WORKING_IN.get() == 14 { 700 } else { 0 }
     }
 
+    /// The fake driver's `cuMemcpyDtoH`: it writes 7 to each byte it is given.
+    unsafe extern "C" fn to_host(out: *mut c_void, at: u64, bytes: usize) -> CuResult {
+        // SAFETY: the caller gives `bytes` bytes at `out`.
+        unsafe { out.cast::<u8>().write_bytes(7, bytes) };
+        ask(format!("read {bytes} bytes at {at:#x}"));
+        0
+    }
+
     /// The fake driver's `cuMemcpyHtoD`: it says the `u64` it is given.
     unsafe extern "C" fn to_device(at: u64, from: *const c_void, bytes: usize) -> CuResult {
         // SAFETY: the caller gives `bytes` bytes at `from`, which are a `u64`.
@@ -1966,6 +2016,7 @@ mod tests {
         api.launch = launch;
         api.launch_cooperative = launch_cooperative;
         api.create_stream = create_stream;
+        api.priorities = priorities;
         api.destroy_stream = destroy_stream;
         api.sync_stream = sync_stream;
         api.create_event = create_event;
@@ -1986,6 +2037,7 @@ mod tests {
         api.copy_async = copy_async;
         api.memory_info = memory_info;
         api.to_device = to_device;
+        api.to_host = to_host;
         api.free = free;
         api.error_name = error_name;
         api.error_string = error_string;
@@ -2118,7 +2170,7 @@ mod tests {
     fn a_stream_is_made_blocking_waited_for_and_destroyed_as_the_driver_is_asked() -> Result {
         let cuda = gpu()?;
         let (first, second) = (cuda.stream()?, cuda.stream()?);
-        assert_eq!(asked(), ["create 0x100 with flags 0 in 1", "create 0x200 with flags 0 in 1"]);
+        assert_eq!(asked(), ["create 0x100 with flags 0 at 0 in 1", "create 0x200 with flags 0 at 0 in 1"]);
         first.sync()?;
         assert_eq!(asked(), ["sync 0x100 in 1"]);
         drop(cuda);
@@ -2129,12 +2181,34 @@ mod tests {
         Ok(())
     }
 
+    /// A stream apart is made as the driver is asked for a stream with `CU_STREAM_NON_BLOCKING`, 1, at the priority 0,
+    /// and an urgent one at the greatest priority that the driver says the GPU has: -5 on the fake GPU. A refusal of
+    /// either call is the error of making it.
+    #[test]
+    fn a_stream_apart_is_made_non_blocking_and_an_urgent_one_at_the_greatest_priority() -> Result {
+        let cuda = gpu()?;
+        let streams = (cuda.stream_apart(false)?, cuda.stream_apart(true)?);
+        let made =
+            ["create 0x100 with flags 1 at 0 in 1", "ask the priorities in 1", "create 0x200 with flags 1 at -5 in 1"];
+        assert_eq!(asked(), made);
+        drop(streams);
+        let said = "cuCtxGetStreamPriorityRange: CUDA_ERROR_INVALID_CONTEXT (201): invalid device context";
+        assert_eq!(gpu_in(13)?.stream_apart(true).err().ok_or("stream_apart gave Ok")?.to_string(), said);
+        let said = "cuStreamCreateWithPriority: CUDA_ERROR_INVALID_CONTEXT (201): invalid device context";
+        assert_eq!(gpu_in(13)?.stream_apart(false).err().ok_or("stream_apart gave Ok")?.to_string(), said);
+        Ok(())
+    }
+
     /// What the driver refuses is the error of the call it refused, in the driver's words: a stream is not made where
-    /// it refuses `cuStreamCreate`, and the work that failed on a stream is the error of the `sync` that waits for it.
+    /// it refuses `cuStreamCreateWithPriority`, and the work that failed on a stream is the error of the `sync` that
+    /// waits for it.
     #[test]
     fn a_refusal_of_the_driver_is_the_error_of_making_a_stream_and_of_waiting_for_one() -> Result {
         let e = gpu_in(13)?.stream().err().ok_or("stream gave Ok")?;
-        assert_eq!(e.to_string(), "cuStreamCreate: CUDA_ERROR_INVALID_CONTEXT (201): invalid device context");
+        assert_eq!(
+            e.to_string(),
+            "cuStreamCreateWithPriority: CUDA_ERROR_INVALID_CONTEXT (201): invalid device context"
+        );
         gpu()?.stream()?.sync()?;
         let e = gpu_in(14)?.stream()?.sync().err().ok_or("sync gave Ok")?;
         let said = "cuStreamSynchronize: CUDA_ERROR_ILLEGAL_ADDRESS (700): an illegal memory access was encountered";
@@ -2215,7 +2289,7 @@ mod tests {
         let (first, second) = (gpu_in(11)?, gpu_in(12)?);
         let (on_first, on_second) = (kernel(&first)?, kernel(&second)?);
         let (a, b) = (first.stream()?, second.stream()?);
-        assert_eq!(asked(), ["create 0x100 with flags 0 in 11", "create 0x200 with flags 0 in 12"]);
+        assert_eq!(asked(), ["create 0x100 with flags 0 at 0 in 11", "create 0x200 with flags 0 at 0 in 12"]);
         let (launch_a, launch_b) = running(&a, || (launched(&on_first), launched(&on_second)));
         assert_eq!(launch_a?, ["launch on 0x100 in 11"]);
         assert_eq!(launch_b?, ["launch on 0x0 in 12"]);
@@ -2776,7 +2850,7 @@ mod tests {
             assert_eq!(e.to_string(), says);
             let want = [
                 begin(0x100).replace("in 1", "in 2"),
-                format!("create {made:#x} with flags 0 in 1"),
+                format!("create {made:#x} with flags 0 at 0 in 1"),
                 format!("destroy {made:#x} in 1"),
                 // The capture's context cannot be made current: the capture is ended in the one that is, and the
                 // instantiate is not asked for.
@@ -2878,6 +2952,44 @@ mod tests {
         asked();
         cuda.copy(&mut middle.part_mut(1..3).ok_or("part_mut gave None")?, &from.part(..2).ok_or("part gave None")?)?;
         assert_eq!(asked(), [format!("copy 8 bytes from {first:#x} to {into:#x} on 0x0 in 1")]);
+        Ok(())
+    }
+
+    /// A copy and a zeroing at addresses go to the current stream, as `copy` and `zero` do, with the bytes of the
+    /// elements; and a write and a read at addresses are the driver's that wait, as `write` and `read` are. A length of
+    /// more bytes than there are addresses is refused, and the driver is not asked.
+    #[test]
+    fn copies_and_zeros_at_addresses_go_to_the_current_stream_and_writes_and_reads_wait() -> Result {
+        let cuda = gpu()?;
+        let stream = cuda.stream()?;
+        let (to, from) = (Ptr::<u32>::new(0x7000_0000_1000), Ptr::<u32>::new(0x7000_0000_2000));
+        asked();
+        // SAFETY: the fake driver reaches no memory.
+        unsafe {
+            cuda.copy_at(to, from, 3)?;
+            running(&stream, || cuda.copy_at(to, from, 3))?;
+            cuda.zero_at(to, 4)?;
+            running(&stream, || cuda.zero_at(to, 4))?;
+            cuda.write_at(Ptr::<u64>::new(0x7000_0000_1000), &[0x1234])?;
+        }
+        let mut out = [0u16; 3];
+        // SAFETY: the fake driver reaches no memory.
+        unsafe { cuda.read_at(Ptr::new(0x7000_0000_2000), &mut out) }?;
+        let want = [
+            "copy 12 bytes from 0x700000002000 to 0x700000001000 on 0x0 in 1",
+            "copy 12 bytes from 0x700000002000 to 0x700000001000 on 0x100 in 1",
+            "set 0x700000001000 to 0, 16 bytes",
+            "set 0x700000001000 to 0, 16 bytes on 0x100",
+            "write 0x1234 at 0x700000001000, 8 bytes",
+            "read 6 bytes at 0x700000002000",
+        ];
+        assert_eq!((asked(), out), (want.map(String::from).to_vec(), [0x707; 3]));
+        // SAFETY: the fake driver reaches no memory.
+        let (copied, zeroed) = unsafe { (cuda.copy_at(to, from, usize::MAX), cuda.zero_at(to, usize::MAX)) };
+        let words = format!("{} elements of 4 bytes are more bytes than there are addresses", usize::MAX);
+        let said = (copied.err().map(|e| e.to_string()), zeroed.err().map(|e| e.to_string()));
+        assert_eq!(said, (Some(format!("cuMemcpyAsync: {words}")), Some(format!("cuMemsetD8Async: {words}"))));
+        assert!(asked().is_empty(), "the driver was asked");
         Ok(())
     }
 

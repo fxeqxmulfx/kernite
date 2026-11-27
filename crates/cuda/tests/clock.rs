@@ -48,9 +48,10 @@ const LAUNCHES: usize = 50_000;
 /// How long each kernel waits, by the clock from its start: about twenty ticks of the clock, each about a microsecond.
 const NANOS: u64 = 20_000;
 
-/// The most that the wait may take beyond `NANOS`: a second, as the GPU may be given to another program for a while,
-/// and much less than a wrong read is off by, which is more than 10^17 nanoseconds.
-const FAR: u64 = 1_000_000_000;
+/// The most that the wait may take beyond `NANOS`, by the clock: more than eleven days, which no run takes, however
+/// long the GPU is given to another program, and much less than a wrong read is off by, which is more than 10^17
+/// nanoseconds.
+const FAR: u64 = 1_000_000_000_000_000;
 
 /// The words one launch writes.
 const WORDS: usize = 3;

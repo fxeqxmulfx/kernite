@@ -1,15 +1,16 @@
 //! A buffer that reserves addresses for more elements than it has, on the GPU here, if there is one: it grows and
-//! shrinks at the same addresses, and a kernel, a copy and `read` take it as any buffer. Two kernels: `add_one`,
+//! shrinks at the same addresses, moves the granules past a split to the host's memory and back, and a kernel, a copy
+//! and `read` take it as any buffer. Two kernels: `add_one`,
 //! written here, adds 1 to each of the first `n` words of its memory, and `waits`, of `gpu`, spins until the host
-//! writes a flag, or a time has gone by, and then writes whether it saw the flag. A kernel that sees a flag the host
+//! writes a flag, giving up only in a hang, and then writes whether it saw the flag. A kernel that sees a flag the host
 //! writes after a call returned shows that the call did not wait for it, however long either took, as other programs'
 //! kernels on the GPU change the times.
 //!
-//! The tests run one at a time: they hold memory of the GPU whose free bytes they ask about, and a test that held 40
-//! MB beside another's call would be seen by it.
+//! The tests run one at a time: a kernel that a flag holds keeps back the work of every test on the null stream. What
+//! the driver is asked for, a granule at a time, is the fake driver's to show, in the tests of `kernite-cuda` itself:
+//! other programs take and give back the GPU's memory, so its free bytes do not show it.
 
 use std::sync::MutexGuard;
-use std::time::Instant;
 
 use kernite_cuda::{Cuda, Grid, Module, Ptr, arg};
 
@@ -59,6 +60,10 @@ const FAR: usize = 10_000_000;
 
 /// What the reservations are for: 1 << 28 words, which is 1 GiB of addresses and none of the GPU's memory.
 const CAPACITY: usize = 1 << 28;
+
+/// GUIDE.md's words for a GPU that cannot map the host's memory at addresses it reserves.
+const NO_HOST: &str = "cuMemCreate: the GPU cannot map the host's memory at addresses it reserves: its \
+                       CU_DEVICE_ATTRIBUTE_HOST_NUMA_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED is 0";
 
 /// What a test of the GPU is given: the lock, the GPU and the kernel `add_one`. A test binds the lock first, so that it
 /// is dropped last, after the memory of the test is freed.
@@ -164,13 +169,8 @@ fn a_kernel_a_copy_and_a_read_take_a_buffer_that_grew_as_they_take_any_buffer() 
 fn a_buffer_backs_a_granule_at_a_time_and_is_refused_a_growth_past_its_reservation() -> Result {
     let Some((_alone, cuda, module)) = setup()? else { return Ok(()) };
     let mut cache = cuda.reserve::<u32>(CAPACITY)?;
-    // One element has a granule of memory, and the GPU may use all of it. Other programs hold and free memory too, so
-    // the fall of the free bytes is asked to be half a granule.
-    let (before, total) = cuda.memory()?;
+    // One element has a granule of memory, and the GPU may use all of it.
     cache.grow(1)?;
-    let (free, _) = cuda.memory()?;
-    eprintln!("the GPU has {before} bytes free of {total} before a buffer grows to 1 element, and {free} after");
-    assert!(free + 4 * WORDS / 2 <= before, "{free} bytes are free, and were {before}: the granule is not backed");
     cache.grow(WORDS)?;
     add_one(&module, cache.ptr(), WORDS as u32)?;
     assert!(cache.read()?.iter().all(|w| *w == 1), "the GPU did not reach the whole granule");
@@ -218,38 +218,22 @@ fn a_buffer_that_alloc_or_upload_made_neither_grows_nor_shrinks() -> Result {
 }
 
 #[test]
-fn a_shrink_gives_the_gpu_its_memory_back_and_what_the_buffer_keeps_is_as_it_was() -> Result {
+fn a_shrink_leaves_what_the_buffer_keeps_as_it_was_and_the_elements_it_grows_into_again_are_zero() -> Result {
     let Some((_alone, cuda, _)) = setup()? else { return Ok(()) };
     let mut cache = cuda.reserve::<u32>(CAPACITY)?;
-    let (before, total) = cuda.memory()?;
     cache.grow(FAR)?;
     let (at, words) = (cache.ptr().addr(), words(FAR, 3));
     cache.write(&words)?;
-    let (held, _) = cuda.memory()?;
-    eprintln!("the GPU has {before} bytes free of {total} before a buffer grows to {FAR} elements, and {held} after");
-    // Other programs hold and free memory too, so each check asks for half of what the buffer took or gave back.
-    let said = format!("{held} bytes are free, and were {before}: the 20 granules are not backed");
-    assert!(held + 20 * 4 * WORDS / 2 <= before, "{said}");
-    let back = |granules: usize, free: usize| {
-        let said = format!("{free} bytes are free, and were {held}: the memory of {granules} granules is not back");
-        assert!(free >= held + granules * 4 * WORDS / 2, "{said}");
-    };
     // The buffer keeps the first granule and ten words of the second, and gives back the 18 granules after them.
     let kept = WORDS + 10;
     // SAFETY: no work is queued or running: `write` came after the zeros of the growth, and returned when its words
     // were on the GPU; nothing else reaches the buffer.
     unsafe { cache.shrink(kept) }?;
     assert_eq!((cache.len(), cache.ptr().addr()), (kept, at));
-    let (free, _) = cuda.memory()?;
-    eprintln!("the GPU has {free} bytes free of {total} after a shrink to {kept} elements");
-    back(18, free);
     assert_eq!(cache.read()?, words[..kept], "what the buffer keeps changed");
     // Down to 1000 elements, the second granule goes back as well: no element of it is left.
     // SAFETY: as above.
     unsafe { cache.shrink(1000) }?;
-    let (free, _) = cuda.memory()?;
-    eprintln!("the GPU has {free} bytes free of {total} after a shrink to 1000 elements");
-    back(19, free);
     assert_eq!((cache.len(), cache.ptr().addr()), (1000, at));
     assert_eq!(cache.read()?, words[..1000], "what the buffer keeps changed");
     // The elements it grows into again are zero, those of the granule it kept too, which held words.
@@ -262,9 +246,6 @@ fn a_shrink_gives_the_gpu_its_memory_back_and_what_the_buffer_keeps_is_as_it_was
     // SAFETY: as above.
     unsafe { cache.shrink(0) }?;
     assert_eq!((cache.len(), cache.read()?), (0, vec![]));
-    let (free, _) = cuda.memory()?;
-    eprintln!("the GPU has {free} bytes free of {total} after a shrink to 0 elements");
-    back(20, free);
     cache.grow(FAR)?;
     assert!(cache.read()?.iter().all(|w| *w == 0));
     // A shrink past what it has says so, and the buffer is as it was.
@@ -272,11 +253,6 @@ fn a_shrink_gives_the_gpu_its_memory_back_and_what_the_buffer_keeps_is_as_it_was
     let past = unsafe { cache.shrink(FAR + 1) }.err().ok_or("shrink gave Ok")?;
     assert_eq!(past.to_string(), format!("cuMemUnmap: a buffer of {FAR} elements shrunk to {}", FAR + 1));
     assert_eq!(cache.len(), FAR);
-    // Dropping it gives all of it back.
-    drop(cache);
-    let (free, _) = cuda.memory()?;
-    eprintln!("the GPU has {free} bytes free of {total} after the buffer is dropped");
-    back(20, free);
     Ok(())
 }
 
@@ -295,8 +271,8 @@ fn a_shrink_does_not_wait_for_a_kernel_that_works_on_the_elements_the_buffer_kee
     // SAFETY: the kernel reaches the first word, which the buffer keeps, and nothing else reaches the elements given
     // back: the zeros of the growth were waited for.
     unsafe { cache.shrink(1000) }?;
-    // The kernel still spins, as the flag is not written: a shrink that waited for it would have returned when the
-    // kernel's time went by, and the kernel would have written 2.
+    // The kernel still spins, as the flag is not written: a shrink that waited for it would have returned only when
+    // the kernel gave up, in a hang, and the kernel would have written `NOT_SEEN`.
     poke(&mut flag, 1);
     cuda.sync()?;
     assert_eq!(cache.read()?[0], SEEN, "the kernel did not see the flag: the shrink waited for it");
@@ -311,12 +287,9 @@ fn a_growth_returns_before_the_gpu_has_written_its_zeros() -> Result {
     let (mut flag, out) = (cuda.pinned::<u32>(1)?, cuda.pinned::<u32>(1)?);
     // `waits` holds the null stream until the host writes the flag, and the zeros of the growth are queued behind it.
     hold(&module, flag.ptr(), out.ptr())?;
-    let started = Instant::now();
     cache.grow(FAR)?;
-    let took = started.elapsed();
-    eprintln!("a growth to {FAR} elements returned after {took:?}, with the kernel before it still spinning");
     // The host has not written the flag, so the kernel still spins: a growth that waited for the work before its zeros
-    // would return only when the kernel gives up, after five seconds, and writes 2.
+    // would return only when the kernel gives up, in a hang, and writes `NOT_SEEN`.
     poke(&mut flag, 1);
     cuda.sync()?;
     assert_eq!(out.host()?, [SEEN], "the kernel did not see the flag: the growth waited for the kernel before it");
@@ -337,5 +310,87 @@ fn two_buffers_reserved_have_addresses_of_their_own_and_hold_what_each_was_given
     a.write(&a_words)?;
     b.write(&b_words)?;
     assert_eq!((a.read()?, b.read()?), (a_words, b_words));
+    Ok(())
+}
+
+#[test]
+fn a_split_moves_granules_with_what_they_hold_and_a_kernel_and_the_host_reach_those_in_the_hosts_memory() -> Result {
+    let Some((_alone, cuda, module)) = setup()? else { return Ok(()) };
+    let mut cache = cuda.reserve::<u32>(4 * WORDS)?;
+    cache.grow(3 * WORDS)?;
+    let (at, words) = (cache.ptr().addr(), words(3 * WORDS, 5));
+    cache.write(&words)?;
+    // The split is that of whole granules: the third granule goes to the host's memory, with what it holds.
+    // SAFETY: no work is queued or running: `write` came after the zeros of the growth, and returned when its words
+    // were on the GPU; nothing else reaches the buffer.
+    if let Err(e) = unsafe { cache.move_split(WORDS + 1) } {
+        assert_eq!(e.to_string(), NO_HOST);
+        eprintln!("the GPU cannot: skipped. {e}");
+        return Ok(());
+    }
+    assert_eq!((cache.split(), cache.ptr().addr()), (2 * WORDS, at));
+    assert_eq!(cache.read()?, words, "what the buffer holds changed as it moved");
+    // A kernel reaches the granule in the host's memory, and the host does too, at the same addresses.
+    add_one(&module, cache.ptr(), 3 * WORDS as u32)?;
+    cuda.sync()?;
+    let sums: Vec<u32> = words.iter().map(|w| w.wrapping_add(1)).collect();
+    assert_eq!(cache.read()?, sums);
+    let host = std::ptr::with_exposed_provenance::<u32>((at + 8 * WORDS as u64) as usize);
+    // SAFETY: the granule from element 2 * WORDS on is page-locked memory of the host, which the host may read and
+    // write at the buffer's addresses, and no work reaches it: the sync waited for the kernel.
+    let held = unsafe { std::slice::from_raw_parts(host, WORDS) };
+    assert_eq!(held, &sums[2 * WORDS..], "the host does not read what the kernel wrote");
+    // A growth past the split backs a granule in the host's memory too, and zeros it.
+    cache.grow(4 * WORDS)?;
+    let all = cache.read()?;
+    assert_eq!((&all[..3 * WORDS], all[3 * WORDS..].iter().all(|w| *w == 0)), (&sums[..], true));
+    // And back to the GPU, each granule with what it holds.
+    // SAFETY: no work is queued or running: `read` waited for the zeros of the growth, and nothing else reaches the
+    // buffer.
+    unsafe { cache.move_split(4 * WORDS) }?;
+    assert_eq!((cache.split(), cache.read()?), (4 * WORDS, all));
+    Ok(())
+}
+
+#[test]
+fn a_copy_over_a_split_from_or_to_memory_the_host_reaches_is_made_a_side_at_a_time() -> Result {
+    let Some((_alone, cuda, _)) = setup()? else { return Ok(()) };
+    let mut cache = cuda.reserve::<u32>(4 * WORDS)?;
+    cache.grow(3 * WORDS)?;
+    // The third granule goes to the host's memory, so the split is inside each copy below: the driver ends the process
+    // on one copy over both sides from or to memory the host reaches.
+    // SAFETY: no work is queued or running but the zeros of the growth, on the current stream, which the move waits
+    // for, and nothing else reaches the buffer.
+    if let Err(e) = unsafe { cache.move_split(2 * WORDS) } {
+        assert_eq!(e.to_string(), NO_HOST);
+        eprintln!("the GPU cannot: skipped. {e}");
+        return Ok(());
+    }
+    let written = words(3 * WORDS, 7);
+    cache.write(&written)?;
+    assert_eq!(cache.read()?, written);
+    // A part over the split, as the buffer.
+    let part = words(2 * WORDS, 8);
+    cache.part_mut(WORDS..3 * WORDS).ok_or("past the end")?.write(&part)?;
+    assert_eq!(cache.part(WORDS..3 * WORDS).ok_or("past the end")?.read()?, part);
+    let held = [&written[..WORDS], &part].concat();
+    // To page-locked memory and back.
+    let mut staged = cuda.pinned::<u32>(3 * WORDS)?;
+    cuda.copy(&mut staged, &cache)?;
+    assert_eq!(staged.host()?, &held[..]);
+    let back = words(3 * WORDS, 9);
+    staged.host_mut()?.copy_from_slice(&back);
+    cuda.copy(&mut cache, &staged)?;
+    assert_eq!(cache.read()?, back);
+    // To a buffer of another split, whose second granule is the host's where the first buffer's is the GPU's, and back.
+    let mut other = cuda.reserve::<u32>(4 * WORDS)?;
+    other.grow(3 * WORDS)?;
+    // SAFETY: as for the first buffer.
+    unsafe { other.move_split(WORDS) }?;
+    cuda.copy(&mut other, &cache)?;
+    assert_eq!(other.read()?, back);
+    other.write(&written)?;
+    cache.copy_from(&other)?;
+    assert_eq!(cache.read()?, written);
     Ok(())
 }

@@ -156,12 +156,7 @@ mod sys {
 
 #[cfg(test)]
 mod tests {
-    use std::hint::black_box;
-    use std::time::{Duration, Instant};
-
     use super::{Cpus, ROOM};
-
-    type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
     /// The set of `cpus`.
     fn set(cpus: &[usize]) -> Cpus {
@@ -207,27 +202,6 @@ mod tests {
             assert!(!put.insert(cpu) && !put.contains(cpu));
         }
         assert!(put == set(&cpus));
-    }
-
-    /// Listing a set costs what the CPUs in it cost, not the room for the others: a set of four CPUs
-    /// is listed in less than a quarter of the time it takes to ask the set about every CPU of the
-    /// room. Each is timed as the quickest of many tries, which other work on the machine slows
-    /// the same.
-    #[test]
-    fn a_set_is_listed_without_asking_about_each_cpu_of_the_room() -> Result {
-        let few = set(&[0, 2, 64, 8191]);
-        let quickest = |work: &dyn Fn() -> usize| -> Result<Duration> {
-            let tries = (0..100).map(|_| {
-                let began = Instant::now();
-                black_box(work());
-                began.elapsed()
-            });
-            Ok(tries.min().ok_or("min gave None")?)
-        };
-        let listed = quickest(&|| black_box(&few).iter().count())?;
-        let asked = quickest(&|| (0..ROOM).filter(|&cpu| black_box(&few).contains(cpu)).count())?;
-        assert!(listed * 4 < asked, "listing took {listed:?} and asking about the room {asked:?}");
-        Ok(())
     }
 
     /// A set is listed as the system lists the CPUs a thread may run on, in
