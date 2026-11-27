@@ -7,6 +7,8 @@ release gives it its version.
 
 ## Unreleased
 
+## 0.8.0 (2026-11-27)
+
 - kernite-cuda makes a stream apart, `cuda.stream_apart(urgent)`: its work and the null stream's do not wait for each
   other, and an urgent one runs at the GPU's greatest priority.
 - kernite-cuda puts the granules of a buffer that grows and shrinks, from element `at` on, in the host's page-locked
