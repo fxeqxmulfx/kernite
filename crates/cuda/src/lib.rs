@@ -42,7 +42,9 @@
 //!
 //! [`Cuda::reserve`] makes a buffer that grows and shrinks at the same addresses: it reserves addresses for the
 //! elements it may have, [`Buffer::grow`] backs them with the GPU's memory, and [`Buffer::shrink`], which is `unsafe`,
-//! gives the memory back, a granule of the driver's at a time, 2 MiB on the GPU here.
+//! gives the memory back, a granule of the driver's at a time, 2 MiB on the GPU here. [`Buffer::move_split`], `unsafe`
+//! too, puts its granules from a split on in the host's memory, at the same addresses, where the GPU's kernels reach
+//! them over the bus.
 //!
 //! A buffer is the GPU's own memory, and the host reaches it by copies. [`Unified`] memory is
 //! reached by the host and by the GPU's kernels at one address, with no copy: [`Cuda::managed`]
@@ -239,6 +241,7 @@ api! {
     map_memory = c"cuMemMap"(u64, usize, usize, u64, u64);
     set_access = c"cuMemSetAccess"(u64, usize, *const Access, usize);
     unmap_memory = c"cuMemUnmap"(u64, usize);
+    retain_memory = c"cuMemRetainAllocationHandle"(*mut u64, *mut c_void);
     range_attribute = c"cuMemRangeGetAttribute"(*mut c_void, usize, c_int, u64, usize);
     load_module = c"cuModuleLoadDataEx"(*mut Handle, *const c_void, c_uint, *mut c_int, *mut *mut c_void);
     unload_module = c"cuModuleUnload"(Handle);
@@ -872,7 +875,7 @@ impl<T: Plain> Buffer<T> {
     /// Sets every element to zero, on the current stream, after the work that stream was given before. It returns
     /// before the GPU has done it: `read`, `write` and [`Cuda::sync`] wait for it.
     pub fn zero(&mut self) -> Result<(), Error> {
-        self.driver.zero(self.ptr, self.len * size_of::<T>())
+        self.zero_bytes(0, self.len * size_of::<T>())
     }
 
     /// Copies what `from` holds to it, after the kernels launched before have run on the GPU of either, and before

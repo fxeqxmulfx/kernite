@@ -1,5 +1,6 @@
 //! A buffer that reserves addresses for more elements than it has, on the GPU here, if there is one: it grows and
-//! shrinks at the same addresses, and a kernel, a copy and `read` take it as any buffer. Two kernels: `add_one`,
+//! shrinks at the same addresses, moves the granules past a split to the host's memory and back, and a kernel, a copy
+//! and `read` take it as any buffer. Two kernels: `add_one`,
 //! written here, adds 1 to each of the first `n` words of its memory, and `waits`, of `gpu`, spins until the host
 //! writes a flag, giving up only in a hang, and then writes whether it saw the flag. A kernel that sees a flag the host
 //! writes after a call returned shows that the call did not wait for it, however long either took, as other programs'
@@ -59,6 +60,10 @@ const FAR: usize = 10_000_000;
 
 /// What the reservations are for: 1 << 28 words, which is 1 GiB of addresses and none of the GPU's memory.
 const CAPACITY: usize = 1 << 28;
+
+/// GUIDE.md's words for a GPU that cannot map the host's memory at addresses it reserves.
+const NO_HOST: &str = "cuMemCreate: the GPU cannot map the host's memory at addresses it reserves: its \
+                       CU_DEVICE_ATTRIBUTE_HOST_NUMA_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED is 0";
 
 /// What a test of the GPU is given: the lock, the GPU and the kernel `add_one`. A test binds the lock first, so that it
 /// is dropped last, after the memory of the test is freed.
@@ -305,5 +310,44 @@ fn two_buffers_reserved_have_addresses_of_their_own_and_hold_what_each_was_given
     a.write(&a_words)?;
     b.write(&b_words)?;
     assert_eq!((a.read()?, b.read()?), (a_words, b_words));
+    Ok(())
+}
+
+#[test]
+fn a_split_moves_granules_with_what_they_hold_and_a_kernel_and_the_host_reach_those_in_the_hosts_memory() -> Result {
+    let Some((_alone, cuda, module)) = setup()? else { return Ok(()) };
+    let mut cache = cuda.reserve::<u32>(4 * WORDS)?;
+    cache.grow(3 * WORDS)?;
+    let (at, words) = (cache.ptr().addr(), words(3 * WORDS, 5));
+    cache.write(&words)?;
+    // The split is that of whole granules: the third granule goes to the host's memory, with what it holds.
+    // SAFETY: no work is queued or running: `write` came after the zeros of the growth, and returned when its words
+    // were on the GPU; nothing else reaches the buffer.
+    if let Err(e) = unsafe { cache.move_split(WORDS + 1) } {
+        assert_eq!(e.to_string(), NO_HOST);
+        eprintln!("the GPU cannot: skipped. {e}");
+        return Ok(());
+    }
+    assert_eq!((cache.split(), cache.ptr().addr()), (2 * WORDS, at));
+    assert_eq!(cache.read()?, words, "what the buffer holds changed as it moved");
+    // A kernel reaches the granule in the host's memory, and the host does too, at the same addresses.
+    add_one(&module, cache.ptr(), 3 * WORDS as u32)?;
+    cuda.sync()?;
+    let sums: Vec<u32> = words.iter().map(|w| w.wrapping_add(1)).collect();
+    assert_eq!(cache.read()?, sums);
+    let host = std::ptr::with_exposed_provenance::<u32>((at + 8 * WORDS as u64) as usize);
+    // SAFETY: the granule from element 2 * WORDS on is page-locked memory of the host, which the host may read and
+    // write at the buffer's addresses, and no work reaches it: the sync waited for the kernel.
+    let held = unsafe { std::slice::from_raw_parts(host, WORDS) };
+    assert_eq!(held, &sums[2 * WORDS..], "the host does not read what the kernel wrote");
+    // A growth past the split backs a granule in the host's memory too, and zeros it.
+    cache.grow(4 * WORDS)?;
+    let all = cache.read()?;
+    assert_eq!((&all[..3 * WORDS], all[3 * WORDS..].iter().all(|w| *w == 0)), (&sums[..], true));
+    // And back to the GPU, each granule with what it holds.
+    // SAFETY: no work is queued or running: `read` waited for the zeros of the growth, and nothing else reaches the
+    // buffer.
+    unsafe { cache.move_split(4 * WORDS) }?;
+    assert_eq!((cache.split(), cache.read()?), (4 * WORDS, all));
     Ok(())
 }

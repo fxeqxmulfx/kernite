@@ -1104,6 +1104,20 @@ to those elements is not used again. The zeros that `grow` writes to the element
 for them. Dropping the buffer waits for the kernels, as dropping any buffer does, then unmaps its memory and frees its
 addresses.
 
+`unsafe { cache.move_split(at) }` puts the granules of a reserved buffer from element `at` on in the host's memory, and
+those before them on the GPU: the split, which `cache.split()` says, is the first element of a granule at `at` or past
+it. The host's memory is page-locked, at the buffer's addresses: the GPU's kernels reach it over the bus, and the host
+at the same addresses. A granule that changes sides moves with what it holds, one at a time toward the new split: its
+new memory is mapped at a granule of addresses that `reserve` reserves past the buffer's, the granule is copied there on
+the current stream, which the call waits for, and the new memory takes the place of the old. Where the driver refuses a
+step the split is that of the granules moved, and the granule keeps its memory. The granules that `grow` backs follow
+the split, and the zeros of each of the host's are written alone, as the driver refuses a zeroing over two of them, or
+over one and the GPU's memory. Not every GPU maps the host's memory at addresses it reserves, so where the split first
+puts a granule there, `move_split` asks the GPU, and says in these words where it cannot: `cuMemCreate: the GPU cannot
+map the host's memory at addresses it reserves: its CU_DEVICE_ATTRIBUTE_HOST_NUMA_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED is
+0`. It is `unsafe` as `shrink` is: no work that is queued or running on the GPU may reach a granule that moves, but the
+work the current stream was given before, nor may the host.
+
 `cuda.stream()` is a stream of the GPU: a queue of work that the GPU runs in order, beside the work of other streams.
 The work of a GPU goes to its null stream unless the thread says another: a kernel is launched on the current stream of
 its GPU, and `unsafe { stream.run(|| ..) }` makes `stream` the current stream of its GPU on the thread for the closure.

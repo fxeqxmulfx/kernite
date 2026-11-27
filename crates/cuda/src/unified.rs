@@ -767,7 +767,7 @@ pub(crate) mod tests {
 
     thread_local! {
         /// What each GPU here says of each attribute: the GPU's number is the row, and the attribute's the index.
-        static ATTRIBUTES: Cell<[[c_int; 128]; 2]> = const { Cell::new([[0; 128]; 2]) };
+        static ATTRIBUTES: Cell<[[c_int; 256]; 2]> = const { Cell::new([[0; 256]; 2]) };
         /// How many GPUs the fake driver shows.
         static GPUS: Cell<c_int> = const { Cell::new(1) };
     }
@@ -799,8 +799,8 @@ pub(crate) mod tests {
     }
 
     /// What a GPU says that says each of `flags` is 1 and every other attribute 0.
-    fn says(flags: &[Flag]) -> [c_int; 128] {
-        let mut values = [0; 128];
+    fn says(flags: &[Flag]) -> [c_int; 256] {
+        let mut values = [0; 256];
         for (attribute, _) in flags {
             values[*attribute as usize] = 1;
         }
