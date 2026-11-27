@@ -75,6 +75,28 @@ impl Reservation {
     }
 }
 
+/// Calls `copy(first, n)` for the pieces of a copy of `len` elements, each `n` elements from element `first`: cut at
+/// each of `cuts` among them, and one piece of all where none is. A cut is how many elements of one side of the copy
+/// are before the split of a buffer that [`Buffer::move_split`] moved, so no piece is over both sides of it: the driver
+/// ends the process on such a copy from or to memory the host reaches, a slice of the host's, page-locked memory, or a
+/// buffer's granules in the host's memory, say. The split is at an element, as the size of each `Plain` type divides
+/// a granule.
+pub(super) fn pieces(
+    len: usize,
+    cuts: [usize; 2],
+    mut copy: impl FnMut(usize, usize) -> Result<(), Error>,
+) -> Result<(), Error> {
+    let [a, b] = cuts;
+    let mut first = 0;
+    for cut in [a.min(b), a.max(b)] {
+        if first < cut && cut < len {
+            copy(first, cut - first)?;
+            first = cut;
+        }
+    }
+    copy(first, len - first)
+}
+
 impl Driver {
     /// How many bytes the driver backs memory at `location` with at a time, at reserved addresses.
     fn granularity(&self, location: MemLocation) -> Result<usize, Error> {
@@ -387,6 +409,11 @@ impl<T: Plain> Buffer<T> {
     /// page-locked, and the GPU's kernels reach it there over the bus, and the host too. The granules it grows into
     /// later follow the split, and a split past its addresses puts none in the host's memory.
     ///
+    /// A copy over the split, by [`read`](Buffer::read), [`write`](Buffer::write), [`copy_from`](Buffer::copy_from)
+    /// or [`Cuda::copy`], is made a side at a time, as the driver ends the process on one over both sides from or to
+    /// memory the host reaches: page-locked memory, a slice of the host's, or the granules of a buffer in the host's
+    /// memory.
+    ///
     /// A granule moves through the granule of addresses past the buffer's, which [`reserve`](Cuda::reserve) reserves
     /// with them: the new memory is mapped there, the granule is copied to it on the current stream, which the call
     /// waits for, and the new memory is mapped in the place of the old, which is given back. The granules move one at
@@ -613,6 +640,21 @@ mod tests {
         took(format!("cuMemcpyAsync {} {} {bytes}{}", from_base(to), from_base(from), on(stream)))
     }
 
+    /// The fake driver's `cuMemcpyHtoD`: it copies nothing.
+    unsafe extern "C" fn to_device(to: u64, _: *const c_void, bytes: usize) -> CuResult {
+        took(format!("cuMemcpyHtoD {} {bytes}", from_base(to)))
+    }
+
+    /// The fake driver's `cuMemcpyDtoH`: it copies nothing.
+    unsafe extern "C" fn to_host(_: *mut c_void, from: u64, bytes: usize) -> CuResult {
+        took(format!("cuMemcpyDtoH {} {bytes}", from_base(from)))
+    }
+
+    /// The fake driver's `cuMemcpyPeer`.
+    unsafe extern "C" fn copy_peer(to: u64, _: Handle, from: u64, _: Handle, bytes: usize) -> CuResult {
+        took(format!("cuMemcpyPeer {} {} {bytes}", from_base(to), from_base(from)))
+    }
+
     /// The fake driver's `cuStreamSynchronize`.
     unsafe extern "C" fn sync_stream(stream: Handle) -> CuResult {
         took(format!("cuStreamSynchronize{}", on(stream)))
@@ -677,6 +719,9 @@ mod tests {
             api.retain_memory = retain_memory;
             api.memset = memset;
             api.copy_async = copy_async;
+            api.to_device = to_device;
+            api.to_host = to_host;
+            api.copy_peer = copy_peer;
             api.sync_stream = sync_stream;
             api.synchronize = synchronize;
             api.begin_capture = begin_capture;
@@ -1004,6 +1049,49 @@ mod tests {
         buffer.grow(3 * WORDS + 2)?;
         buffer.grow(3 * WORDS + 2)?;
         assert_eq!(calls(), [zeros(3 * GRANULE + 4, 4)]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_copy_over_a_split_is_made_a_side_at_a_time_and_one_beside_it_at_once() -> Result {
+        let cuda = fake()?;
+        // The granules 0 and 1 are the GPU's, and granule 2 the host's.
+        let mut buffer = holding(&cuda, 4 * WORDS, 3 * WORDS)?;
+        // SAFETY: the fake driver runs no work.
+        unsafe { buffer.move_split(2 * WORDS) }?;
+        calls();
+        // The host's copies of the buffer, and of a part over the split, are a side of it each; those of a part on one
+        // side are one.
+        buffer.write(&[1; 3 * WORDS])?;
+        buffer.read()?;
+        buffer.part(WORDS..3 * WORDS).ok_or("past the end")?.read()?;
+        buffer.part_mut(0..2 * WORDS).ok_or("past the end")?.write(&[1; 2 * WORDS])?;
+        buffer.part(2 * WORDS + 1..3 * WORDS).ok_or("past the end")?.read()?;
+        let (gpu, host) = (format!("0 {}", 2 * GRANULE), format!("{} {GRANULE}", 2 * GRANULE));
+        let copies = [
+            format!("cuMemcpyHtoD {gpu}"),
+            format!("cuMemcpyHtoD {host}"),
+            format!("cuMemcpyDtoH {gpu}"),
+            format!("cuMemcpyDtoH {host}"),
+            format!("cuMemcpyDtoH {GRANULE} {GRANULE}"),
+            format!("cuMemcpyDtoH {host}"),
+            format!("cuMemcpyHtoD {gpu}"),
+            format!("cuMemcpyDtoH {} {}", 2 * GRANULE + 4, GRANULE - 4),
+        ];
+        assert_eq!(calls(), copies);
+        // A copy between two buffers is cut at the split of each: the fake driver reserves the same addresses again,
+        // and the second buffer's split is at granule 1.
+        let mut other = holding(&cuda, 4 * WORDS, 3 * WORDS)?;
+        // SAFETY: the fake driver runs no work.
+        unsafe { other.move_split(WORDS) }?;
+        calls();
+        cuda.copy(&mut other, &buffer)?;
+        other.copy_from(&buffer)?;
+        cuda.copy(&mut other.part_mut(0..WORDS).ok_or("past the end")?, &buffer.part(0..WORDS).ok_or("past the end")?)?;
+        let granules =
+            |call: &str| (0..3).map(|n| format!("{call} {} {} {GRANULE}", n * GRANULE, n * GRANULE)).collect();
+        let one = [format!("cuMemcpyAsync 0 0 {GRANULE}")].to_vec();
+        assert_eq!(calls(), [granules("cuMemcpyAsync"), granules("cuMemcpyPeer"), one].concat());
         Ok(())
     }
 

@@ -92,7 +92,7 @@ mod safe;
 mod stream;
 mod unified;
 
-use reserve::{Access, Properties, Reservation};
+use reserve::{Access, Properties, Reservation, pieces};
 use safe::bounds;
 
 pub use event::{Event, Timed, Untimed};
@@ -469,22 +469,33 @@ impl Driver {
         api.check("cuCtxSynchronize", unsafe { (api.synchronize)() })
     }
 
-    /// Copies `data` to the GPU at `ptr`, after the kernels launched before have run.
-    fn write<T: Plain>(&self, ptr: u64, data: &[T]) -> Result<(), Error> {
+    /// Copies `data` to the GPU at `ptr`, after the kernels launched before have run: its first `cut` elements, those
+    /// before a buffer's split, apart from the rest, as [`pieces`] cuts it.
+    fn write<T: Plain>(&self, ptr: u64, data: &[T], cut: usize) -> Result<(), Error> {
         let api = self.current()?;
-        // SAFETY: it reads as many bytes from `data` as it has.
-        let copied = unsafe { (api.to_device)(ptr, data.as_ptr().cast(), size_of_val(data)) };
-        api.check("cuMemcpyHtoD", copied)
+        pieces(data.len(), [cut; 2], |first, n| {
+            // SAFETY: it reads the `n` elements of `data` from element `first` on, which it has.
+            let copied = unsafe {
+                let from = data.as_ptr().add(first).cast();
+                (api.to_device)(ptr + (first * size_of::<T>()) as u64, from, n * size_of::<T>())
+            };
+            api.check("cuMemcpyHtoD", copied)
+        })
     }
 
-    /// Copies what the GPU holds at `ptr` to `out`, after the kernels launched before have
-    /// run.
-    fn read_into<T: Plain>(&self, ptr: u64, out: &mut [T]) -> Result<(), Error> {
+    /// Copies what the GPU holds at `ptr` to `out`, after the kernels launched before have run: its first `cut`
+    /// elements, those before a buffer's split, apart from the rest, as [`pieces`] cuts it.
+    fn read_into<T: Plain>(&self, ptr: u64, out: &mut [T], cut: usize) -> Result<(), Error> {
         let api = self.current()?;
-        // SAFETY: it writes as many bytes to `out` as it has, and any bits are a `T`, as
-        // `Plain` promises.
-        let copied = unsafe { (api.to_host)(out.as_mut_ptr().cast(), ptr, size_of_val(out)) };
-        api.check("cuMemcpyDtoH", copied)
+        pieces(out.len(), [cut; 2], |first, n| {
+            // SAFETY: it writes the `n` elements of `out` from element `first` on, which it has, and any bits are a
+            // `T`, as `Plain` promises.
+            let copied = unsafe {
+                let to = out.as_mut_ptr().add(first).cast();
+                (api.to_host)(to, ptr + (first * size_of::<T>()) as u64, n * size_of::<T>())
+            };
+            api.check("cuMemcpyDtoH", copied)
+        })
     }
 
     /// Sets the `bytes` bytes at `ptr` to zero, on the current stream: after the work that stream was given before,
@@ -856,7 +867,7 @@ impl<T: Plain> Buffer<T> {
     /// has not as many elements: `cuMemcpyHtoD: a buffer of 4 elements written with 2`.
     pub fn write(&mut self, data: &[T]) -> Result<(), Error> {
         same_len("cuMemcpyHtoD", "a buffer", self.len, "written with", data.len())?;
-        self.driver.write(self.ptr, data)
+        self.driver.write(self.ptr, data, self.split())
     }
 
     /// What it holds, after the kernels launched before have run.
@@ -870,7 +881,7 @@ impl<T: Plain> Buffer<T> {
     /// if `out` has not as many elements: `cuMemcpyDtoH: a buffer of 4 elements read into 2`.
     pub fn read_into(&self, out: &mut [T]) -> Result<(), Error> {
         same_len("cuMemcpyDtoH", "a buffer", self.len, "read into", out.len())?;
-        self.driver.read_into(self.ptr, out)
+        self.driver.read_into(self.ptr, out, self.split())
     }
 
     /// Sets every element to zero, on the current stream, after the work that stream was given before. It returns
@@ -886,7 +897,10 @@ impl<T: Plain> Buffer<T> {
     /// error if `from` has not as many elements: `cuMemcpyPeer: a buffer of 4 elements copied from one of 2`.
     pub fn copy_from(&mut self, from: &Buffer<T>) -> Result<(), Error> {
         same_len("cuMemcpyPeer", "a buffer", self.len, "copied from one of", from.len)?;
-        self.driver.copy_from(self.ptr, &from.driver, from.ptr, self.len * size_of::<T>())
+        pieces(self.len, [self.split(), from.split()], |first, n| {
+            let at = (first * size_of::<T>()) as u64;
+            self.driver.copy_from(self.ptr + at, &from.driver, from.ptr + at, n * size_of::<T>())
+        })
     }
 }
 
@@ -1155,7 +1169,7 @@ impl Module {
                 })?;
                 // The variable is the module's `.u64` that its kernels read the address from.
                 let at = memory.ptr().addr().next_multiple_of(align as u64);
-                m.driver.write(ptr, &[at])?;
+                m.driver.write(ptr, &[at], 1)?;
                 m.outside.push(memory);
                 (ptr, bytes) = (at, size);
             }
@@ -1347,7 +1361,7 @@ impl<T: Plain> Global<'_, T> {
     /// has not as many elements: `cuMemcpyHtoD: a module's memory of 4 elements written with 2`.
     pub fn write(&self, data: &[T]) -> Result<(), Error> {
         same_len("cuMemcpyHtoD", "a module's memory", self.len, "written with", data.len())?;
-        self.module.driver.write(self.ptr, data)
+        self.module.driver.write(self.ptr, data, data.len())
     }
 
     /// What it holds, after the kernels launched before have run.
@@ -1362,7 +1376,7 @@ impl<T: Plain> Global<'_, T> {
     /// into 2`.
     pub fn read_into(&self, out: &mut [T]) -> Result<(), Error> {
         same_len("cuMemcpyDtoH", "a module's memory", self.len, "read into", out.len())?;
-        self.module.driver.read_into(self.ptr, out)
+        self.module.driver.read_into(self.ptr, out, out.len())
     }
 
     /// Sets every element to zero, on the current stream, after the work that stream was given before, and does not

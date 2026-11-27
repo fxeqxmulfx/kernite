@@ -707,7 +707,7 @@ impl<T: Plain> Memory<T> for Unified<'static, T> {
         Ok((self.ptr(), self.len))
     }
 
-    fn reach(&self, cuda: &Cuda) -> Result<(Ptr<T>, usize), Error> {
+    fn reach(&self, cuda: &Cuda) -> Result<(Ptr<T>, usize, usize), Error> {
         cuda.reaches(&self.driver)?;
         if matches!(self.kind, Kind::Lent) {
             // The driver copies pageable memory through memory of its own: it reads it as the call is made, which is
@@ -718,7 +718,7 @@ impl<T: Plain> Memory<T> for Unified<'static, T> {
                 .to_string();
             return Err(Error::new("cuMemcpyAsync", why));
         }
-        Ok((self.ptr(), self.len))
+        Ok((self.ptr(), self.len, self.len))
     }
 }
 

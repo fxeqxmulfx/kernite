@@ -1112,11 +1112,14 @@ new memory is mapped at a granule of addresses that `reserve` reserves past the 
 the current stream, which the call waits for, and the new memory takes the place of the old. Where the driver refuses a
 step the split is that of the granules moved, and the granule keeps its memory. The granules that `grow` backs follow
 the split, and the zeros of each of the host's are written alone, as the driver refuses a zeroing over two of them, or
-over one and the GPU's memory. Not every GPU maps the host's memory at addresses it reserves, so where the split first
-puts a granule there, `move_split` asks the GPU, and says in these words where it cannot: `cuMemCreate: the GPU cannot
-map the host's memory at addresses it reserves: its CU_DEVICE_ATTRIBUTE_HOST_NUMA_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED is
-0`. It is `unsafe` as `shrink` is: no work that is queued or running on the GPU may reach a granule that moves, but the
-work the current stream was given before, nor may the host.
+over one and the GPU's memory. A copy over the split, by `read`, `write`, `copy_from` or `cuda.copy`, is made a side at
+a time, as the driver ends the process on one over both sides from or to memory the host reaches: page-locked memory, a
+slice of the host's, or the granules of a buffer in the host's memory. Not every GPU maps the host's memory at addresses
+it reserves, so where the split first puts a granule there, `move_split` asks the GPU, and says in these words where it
+cannot: `cuMemCreate: the GPU cannot map the host's memory at addresses it reserves: its
+CU_DEVICE_ATTRIBUTE_HOST_NUMA_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED is 0`. It is `unsafe` as `shrink` is: no work that is
+queued or running on the GPU may reach a granule that moves, but the work the current stream was given before, nor may
+the host.
 
 `cuda.stream()` is a stream of the GPU: a queue of work that the GPU runs in order, beside the work of other streams.
 The work of a GPU goes to its null stream unless the thread says another: a kernel is launched on the current stream of

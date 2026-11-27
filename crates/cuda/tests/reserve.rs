@@ -351,3 +351,46 @@ fn a_split_moves_granules_with_what_they_hold_and_a_kernel_and_the_host_reach_th
     assert_eq!((cache.split(), cache.read()?), (4 * WORDS, all));
     Ok(())
 }
+
+#[test]
+fn a_copy_over_a_split_from_or_to_memory_the_host_reaches_is_made_a_side_at_a_time() -> Result {
+    let Some((_alone, cuda, _)) = setup()? else { return Ok(()) };
+    let mut cache = cuda.reserve::<u32>(4 * WORDS)?;
+    cache.grow(3 * WORDS)?;
+    // The third granule goes to the host's memory, so the split is inside each copy below: the driver ends the process
+    // on one copy over both sides from or to memory the host reaches.
+    // SAFETY: no work is queued or running but the zeros of the growth, on the current stream, which the move waits
+    // for, and nothing else reaches the buffer.
+    if let Err(e) = unsafe { cache.move_split(2 * WORDS) } {
+        assert_eq!(e.to_string(), NO_HOST);
+        eprintln!("the GPU cannot: skipped. {e}");
+        return Ok(());
+    }
+    let written = words(3 * WORDS, 7);
+    cache.write(&written)?;
+    assert_eq!(cache.read()?, written);
+    // A part over the split, as the buffer.
+    let part = words(2 * WORDS, 8);
+    cache.part_mut(WORDS..3 * WORDS).ok_or("past the end")?.write(&part)?;
+    assert_eq!(cache.part(WORDS..3 * WORDS).ok_or("past the end")?.read()?, part);
+    let held = [&written[..WORDS], &part].concat();
+    // To page-locked memory and back.
+    let mut staged = cuda.pinned::<u32>(3 * WORDS)?;
+    cuda.copy(&mut staged, &cache)?;
+    assert_eq!(staged.host()?, &held[..]);
+    let back = words(3 * WORDS, 9);
+    staged.host_mut()?.copy_from_slice(&back);
+    cuda.copy(&mut cache, &staged)?;
+    assert_eq!(cache.read()?, back);
+    // To a buffer of another split, whose second granule is the host's where the first buffer's is the GPU's, and back.
+    let mut other = cuda.reserve::<u32>(4 * WORDS)?;
+    other.grow(3 * WORDS)?;
+    // SAFETY: as for the first buffer.
+    unsafe { other.move_split(WORDS) }?;
+    cuda.copy(&mut other, &cache)?;
+    assert_eq!(other.read()?, back);
+    other.write(&written)?;
+    cache.copy_from(&other)?;
+    assert_eq!(cache.read()?, written);
+    Ok(())
+}

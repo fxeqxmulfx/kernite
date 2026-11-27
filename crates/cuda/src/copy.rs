@@ -1,7 +1,7 @@
 //! A copy from one memory to another, which does not wait: on the current stream. And the copies and zeros at
 //! addresses that a program works out, which nothing checks.
 
-use super::{Cuda, Driver, Error, Memory, MemoryMut, Plain, Ptr, bytes, same_len};
+use super::{Cuda, Driver, Error, Memory, MemoryMut, Plain, Ptr, bytes, pieces, same_len};
 
 impl Cuda {
     /// Copies what `from` holds to `to`, on the current stream of this GPU: after the work that stream was given
@@ -12,7 +12,9 @@ impl Cuda {
     /// registered for good, or a [`Part`] of either, one that `part_mut` gives for `to`. Either may be of either kind:
     /// the copy tells the direction by the addresses, so one call copies from page-locked memory to a buffer, back, and
     /// from a buffer to a buffer, and a copy from `from.part(0..3)` to `to.part_mut(2..5)` copies a part into a part. A
-    /// copy in a [`Stream::run`] of a stream of its own runs beside a kernel of another stream.
+    /// copy in a [`Stream::run`] of a stream of its own runs beside a kernel of another stream. A copy over the split
+    /// of a buffer that [`Buffer::move_split`] moved is made a side of it at a time, as the driver ends the process on
+    /// one over both sides from or to memory the host reaches.
     ///
     /// The host's calls that reach the memory wait for the copy, as they wait for a kernel: `read`, `write`, `host`,
     /// `host_mut` and dropping it.
@@ -69,15 +71,20 @@ impl Cuda {
     /// [`Cuda::register`]: super::Cuda::register
     /// [`Stream::run`]: super::Stream::run
     /// [`Buffer::copy_from`]: super::Buffer::copy_from
+    /// [`Buffer::move_split`]: super::Buffer::move_split
     pub fn copy<T: Plain>(&self, to: &mut impl MemoryMut<T>, from: &impl Memory<T>) -> Result<(), Error> {
-        let ((to, len), (from, from_len)) = (to.reach(self)?, from.reach(self)?);
+        let ((to, len, to_cut), (from, from_len, from_cut)) = (to.reach(self)?, from.reach(self)?);
         same_len("cuMemcpyAsync", "memory", len, "copied from memory of", from_len)?;
-        let bytes = len * size_of::<T>();
         let api = self.driver.current()?;
-        // SAFETY: each address is of `len` elements of memory of this GPU, which the borrows keep for the call and
-        // which lasts until the copy is done, as the host's calls that free or reach it wait for the copy. The stream
-        // is the null stream, or one that a `run` of this thread holds.
-        api.check("cuMemcpyAsync", unsafe { (api.copy_async)(to.addr(), from.addr(), bytes, self.driver.stream()) })
+        pieces(len, [to_cut, from_cut], |first, n| {
+            let at = (first * size_of::<T>()) as u64;
+            // SAFETY: each address is of `n` elements of memory of this GPU, which the borrows keep for the call and
+            // which lasts until the copy is done, as the host's calls that free or reach it wait for the copy. The
+            // stream is the null stream, or one that a `run` of this thread holds.
+            let copied =
+                unsafe { (api.copy_async)(to.addr() + at, from.addr() + at, n * size_of::<T>(), self.driver.stream()) };
+            api.check("cuMemcpyAsync", copied)
+        })
     }
 
     /// Copies the `len` elements at `from` to `to`, as [`copy`](Cuda::copy) does: on the current stream, and the call
@@ -89,9 +96,13 @@ impl Cuda {
     ///
     /// Each address is of `len` elements of memory of this GPU or of the host that the GPU reaches, which the two do
     /// not share, and which lasts until the copy is done: no work and no call of the host reaches the elements at `to`,
-    /// nor writes those at `from`, until then. In a [`Stream::run`], the `# Safety` of `run` holds too.
+    /// nor writes those at `from`, until then. Where the elements at one address are on both sides of the split of a
+    /// buffer that [`Buffer::move_split`] moved, those at the other are of the GPU's own memory or managed memory: the
+    /// driver ends the process on such a copy from or to memory the host reaches, page-locked memory, say, or a
+    /// buffer's granules in the host's memory. In a [`Stream::run`], the `# Safety` of `run` holds too.
     ///
     /// [`Stream::run`]: super::Stream::run
+    /// [`Buffer::move_split`]: super::Buffer::move_split
     pub unsafe fn copy_at<T: Plain>(&self, to: Ptr<T>, from: Ptr<T>, len: usize) -> Result<(), Error> {
         let bytes = bytes::<T>("cuMemcpyAsync", len)?;
         let api = self.driver.current()?;
@@ -122,11 +133,13 @@ impl Cuda {
     ///
     /// `to` is the address of `data.len()` elements of memory of this GPU, and no work reaches them until the copy is
     /// done: the driver may still copy from its own memory to the GPU's when the call returns, before the work that a
-    /// stream apart is given.
+    /// stream apart is given. The elements are on one side of the split of a buffer that [`Buffer::move_split`] moved:
+    /// the driver ends the process on a copy from the host's memory over both.
     ///
     /// [`Buffer::write`]: super::Buffer::write
+    /// [`Buffer::move_split`]: super::Buffer::move_split
     pub unsafe fn write_at<T: Plain>(&self, to: Ptr<T>, data: &[T]) -> Result<(), Error> {
-        self.driver.write(to.addr(), data)
+        self.driver.write(to.addr(), data, data.len())
     }
 
     /// Copies the `out.len()` elements at `from` to `out`, as [`Buffer::read_into`] does: after the kernels launched
@@ -135,10 +148,13 @@ impl Cuda {
     /// # Safety
     ///
     /// `from` is the address of `out.len()` elements of memory of this GPU, which no work writes while the copy runs.
+    /// The elements are on one side of the split of a buffer that [`Buffer::move_split`] moved: the driver ends the
+    /// process on a copy to the host's memory over both.
     ///
     /// [`Buffer::read_into`]: super::Buffer::read_into
+    /// [`Buffer::move_split`]: super::Buffer::move_split
     pub unsafe fn read_at<T: Plain>(&self, from: Ptr<T>, out: &mut [T]) -> Result<(), Error> {
-        self.driver.read_into(from.addr(), out)
+        self.driver.read_into(from.addr(), out, out.len())
     }
 
     /// `Ok` if `memory` is of this GPU: memory of another is not copied here.
