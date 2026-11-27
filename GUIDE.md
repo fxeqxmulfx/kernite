@@ -1363,6 +1363,17 @@ writes it after the call waits for the stream: `register` page-locks the slice w
 order``. `read` and `write` copy the host's own slice, and wait. A zeroing of a slice that `lend` lent is queued in
 order, as that of any other memory is.
 
+A program that works its addresses out itself copies and zeros at them, through the `Ptr` that `Ptr::new(at)` makes of
+an address. `cuda.copy_at(to, from, len)` copies `len` elements from `from` to `to`, and `cuda.zero_at(at, len)` sets
+`len` elements to zero: each goes to the current stream, as `copy` and `zero` do. `cuda.write_at(to, data)` and
+`cuda.read_at(from, out)` copy the host's slice, and wait, as `write` and `read` do. kernite checks none of the
+addresses, so each call is `unsafe`, and its contract is this: each address is of as many elements of the GPU's memory,
+or of the host's that is page-locked, which last until the work is done; and no other work writes the elements until
+then, nor reads those that the call writes. The zeros are of one buffer, and of a buffer that `reserve` made, of its
+GPU's memory or of one granule of the host's, as `grow` writes them. A length of more bytes than there are addresses is
+refused, and the driver is not asked: `cuMemcpyAsync: 18446744073709551615 elements of 4 bytes are more bytes than there
+are addresses`.
+
 A pointer taken before the slice is `Copy`, and the compiler cannot refuse a launch on it, so the launch of a kernel
 that is an `unsafe fn`, which takes pointers, is `unsafe`, and its contract is this: each pointer is to a buffer or to
 unified memory of the GPU, as long as the kernel reads and writes through it; from the launch until the kernel is done,
@@ -1715,7 +1726,8 @@ of the same kernel written with `unsafe`: kernite adds none to the kernel, and t
 
 What kernite cannot prove it refuses, at the first instruction or operand it cannot, and the error says what kernite
 cannot prove there, and that a kernel that does it is an `unsafe fn`, which compiles as it always has, and whose
-launcher takes pointers, `xs.ptr()`, and is `unsafe`. A kernel is an `unsafe fn` when it:
+launcher takes pointers, `xs.ptr()`, or `Ptr::new(at)` for an address `at` that the program works out, and is `unsafe`.
+A kernel is an `unsafe fn` when it:
 
 - writes at an address that is not only its thread's, `[y + (i + 1) * 4]`, or reads memory the kernel may write at one
   that is not, so that a thread may race with another;

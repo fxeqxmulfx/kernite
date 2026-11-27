@@ -61,12 +61,13 @@
 //! has room. All the work goes to the GPU's null stream, unless a thread makes another stream current for a closure,
 //! [`Stream::run`], which [`Cuda::stream`] makes: a launch goes to the current stream of its GPU on the thread, and so
 //! do a prefetch, a copy that does not wait, [`Cuda::copy`], and a zeroing: `zero`, and the zeros that [`Cuda::alloc`],
-//! [`Cuda::managed`], [`Buffer::grow`] and the load of a module write. A stream is blocking, so the copies and the
-//! drops that wait for the null stream's work wait for its work too. [`Cuda::stream_apart`] makes a stream apart, which
-//! is not, at the GPU's greatest priority where it is urgent. An [`Event`], which [`Cuda::event`] makes, is a
-//! point in the work of a stream: the host asks whether the work before it is done, or waits for it, and another
-//! stream waits for it with no wait of the host. [`Cuda::timed_event`] makes one that times work, and
-//! [`Event::duration_since`] says the time between two.
+//! [`Cuda::managed`], [`Buffer::grow`] and the load of a module write. So do [`Cuda::copy_at`] and [`Cuda::zero_at`],
+//! which copy and zero at addresses that a program works out, and are `unsafe`, as kernite checks none of them. A
+//! stream is blocking, so the copies and the drops that wait for the null stream's work wait for its work too.
+//! [`Cuda::stream_apart`] makes a stream apart, which is not, at the GPU's greatest priority where it is urgent. An
+//! [`Event`], which [`Cuda::event`] makes, is a point in the work of a stream: the host asks whether the work before it
+//! is done, or waits for it, and another stream waits for it with no wait of the host. [`Cuda::timed_event`] makes one
+//! that times work, and [`Event::duration_since`] says the time between two.
 //!
 //! A kernel whose blocks wait for each other is launched cooperatively,
 //! [`Module::launch_cooperative`]: every block of the grid runs at once, so there are at most
@@ -905,10 +906,10 @@ impl<T: Plain> fmt::Debug for Buffer<T> {
     }
 }
 
-/// An address on the GPU, of elements of `T`: what a kernel's `*const T` or `*mut T` is
-/// given. A [`Buffer`] gives it, and it points at something only while the buffer lasts. A kernel's
-/// pointer is to a type with a size, but `T` may have none: a kernel that is wrong in this is one
-/// error, at its type, and not a second, here.
+/// An address on the GPU, of elements of `T`: what a kernel's `*const T` or `*mut T` is given. A [`Buffer`] gives it,
+/// and it points at something only while the buffer lasts; [`Ptr::new`] makes it from an address a program works out.
+/// A kernel's pointer is to a type with a size, but `T` may have none: a kernel that is wrong in this is one error, at
+/// its type, and not a second, here.
 #[repr(transparent)]
 pub struct Ptr<T: ?Sized> {
     addr: u64,
@@ -923,7 +924,9 @@ impl<T: ?Sized> Ptr<T> {
 }
 
 impl<T> Ptr<T> {
-    fn new(addr: u64) -> Ptr<T> {
+    /// The address `addr`, as the GPU reckons it: one that a program works out from those its memory gives, say. It is
+    /// safe to make, as only an `unsafe` launch takes it, which says that the memory there is the kernel's.
+    pub fn new(addr: u64) -> Ptr<T> {
         Ptr { addr, of: PhantomData }
     }
 
@@ -1915,6 +1918,14 @@ mod tests {
         if WORKING_IN.get() == 14 { 700 } else { 0 }
     }
 
+    /// The fake driver's `cuMemcpyDtoH`: it writes 7 to each byte it is given.
+    unsafe extern "C" fn to_host(out: *mut c_void, at: u64, bytes: usize) -> CuResult {
+        // SAFETY: the caller gives `bytes` bytes at `out`.
+        unsafe { out.cast::<u8>().write_bytes(7, bytes) };
+        ask(format!("read {bytes} bytes at {at:#x}"));
+        0
+    }
+
     /// The fake driver's `cuMemcpyHtoD`: it says the `u64` it is given.
     unsafe extern "C" fn to_device(at: u64, from: *const c_void, bytes: usize) -> CuResult {
         // SAFETY: the caller gives `bytes` bytes at `from`, which are a `u64`.
@@ -2012,6 +2023,7 @@ mod tests {
         api.copy_async = copy_async;
         api.memory_info = memory_info;
         api.to_device = to_device;
+        api.to_host = to_host;
         api.free = free;
         api.error_name = error_name;
         api.error_string = error_string;
@@ -2926,6 +2938,44 @@ mod tests {
         asked();
         cuda.copy(&mut middle.part_mut(1..3).ok_or("part_mut gave None")?, &from.part(..2).ok_or("part gave None")?)?;
         assert_eq!(asked(), [format!("copy 8 bytes from {first:#x} to {into:#x} on 0x0 in 1")]);
+        Ok(())
+    }
+
+    /// A copy and a zeroing at addresses go to the current stream, as `copy` and `zero` do, with the bytes of the
+    /// elements; and a write and a read at addresses are the driver's that wait, as `write` and `read` are. A length of
+    /// more bytes than there are addresses is refused, and the driver is not asked.
+    #[test]
+    fn copies_and_zeros_at_addresses_go_to_the_current_stream_and_writes_and_reads_wait() -> Result {
+        let cuda = gpu()?;
+        let stream = cuda.stream()?;
+        let (to, from) = (Ptr::<u32>::new(0x7000_0000_1000), Ptr::<u32>::new(0x7000_0000_2000));
+        asked();
+        // SAFETY: the fake driver reaches no memory.
+        unsafe {
+            cuda.copy_at(to, from, 3)?;
+            running(&stream, || cuda.copy_at(to, from, 3))?;
+            cuda.zero_at(to, 4)?;
+            running(&stream, || cuda.zero_at(to, 4))?;
+            cuda.write_at(Ptr::<u64>::new(0x7000_0000_1000), &[0x1234])?;
+        }
+        let mut out = [0u16; 3];
+        // SAFETY: the fake driver reaches no memory.
+        unsafe { cuda.read_at(Ptr::new(0x7000_0000_2000), &mut out) }?;
+        let want = [
+            "copy 12 bytes from 0x700000002000 to 0x700000001000 on 0x0 in 1",
+            "copy 12 bytes from 0x700000002000 to 0x700000001000 on 0x100 in 1",
+            "set 0x700000001000 to 0, 16 bytes",
+            "set 0x700000001000 to 0, 16 bytes on 0x100",
+            "write 0x1234 at 0x700000001000, 8 bytes",
+            "read 6 bytes at 0x700000002000",
+        ];
+        assert_eq!((asked(), out), (want.map(String::from).to_vec(), [0x707; 3]));
+        // SAFETY: the fake driver reaches no memory.
+        let (copied, zeroed) = unsafe { (cuda.copy_at(to, from, usize::MAX), cuda.zero_at(to, usize::MAX)) };
+        let words = format!("{} elements of 4 bytes are more bytes than there are addresses", usize::MAX);
+        let said = (copied.err().map(|e| e.to_string()), zeroed.err().map(|e| e.to_string()));
+        assert_eq!(said, (Some(format!("cuMemcpyAsync: {words}")), Some(format!("cuMemsetD8Async: {words}"))));
+        assert!(asked().is_empty(), "the driver was asked");
         Ok(())
     }
 

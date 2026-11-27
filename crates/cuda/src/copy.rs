@@ -1,6 +1,7 @@
-//! A copy from one memory to another, which does not wait: on the current stream.
+//! A copy from one memory to another, which does not wait: on the current stream. And the copies and zeros at
+//! addresses that a program works out, which nothing checks.
 
-use super::{Cuda, Driver, Error, Memory, MemoryMut, Plain, same_len};
+use super::{Cuda, Driver, Error, Memory, MemoryMut, Plain, Ptr, bytes, same_len};
 
 impl Cuda {
     /// Copies what `from` holds to `to`, on the current stream of this GPU: after the work that stream was given
@@ -77,6 +78,67 @@ impl Cuda {
         // which lasts until the copy is done, as the host's calls that free or reach it wait for the copy. The stream
         // is the null stream, or one that a `run` of this thread holds.
         api.check("cuMemcpyAsync", unsafe { (api.copy_async)(to.addr(), from.addr(), bytes, self.driver.stream()) })
+    }
+
+    /// Copies the `len` elements at `from` to `to`, as [`copy`](Cuda::copy) does: on the current stream, and the call
+    /// does not wait for it. Each address is one the GPU reaches, of its memory or of the host's that is page-locked,
+    /// and the copy tells the direction by them. A `len` of more bytes than there are addresses is refused, and nothing
+    /// is copied: `cuMemcpyAsync: 18446744073709551615 elements of 4 bytes are more bytes than there are addresses`.
+    ///
+    /// # Safety
+    ///
+    /// Each address is of `len` elements of memory of this GPU or of the host that the GPU reaches, which the two do
+    /// not share, and which lasts until the copy is done: no work and no call of the host reaches the elements at `to`,
+    /// nor writes those at `from`, until then. In a [`Stream::run`], the `# Safety` of `run` holds too.
+    ///
+    /// [`Stream::run`]: super::Stream::run
+    pub unsafe fn copy_at<T: Plain>(&self, to: Ptr<T>, from: Ptr<T>, len: usize) -> Result<(), Error> {
+        let bytes = bytes::<T>("cuMemcpyAsync", len)?;
+        let api = self.driver.current()?;
+        // SAFETY: the caller's. The stream is the null stream, or one that a `run` of this thread holds.
+        api.check("cuMemcpyAsync", unsafe { (api.copy_async)(to.addr(), from.addr(), bytes, self.driver.stream()) })
+    }
+
+    /// Sets the `len` elements at `at` to zero, as [`Buffer::zero`] does: on the current stream, and the call does not
+    /// wait for it.
+    ///
+    /// # Safety
+    ///
+    /// `at` is the address of `len` elements of memory of this GPU, which last until the zeros are written, and no work
+    /// and no call of the host reaches them until then. They are in one buffer, or the GPU's own memory of one buffer
+    /// that [`Cuda::reserve`] made, or one granule of its host's: the driver refuses a zeroing over more. In a
+    /// [`Stream::run`], the `# Safety` of `run` holds too.
+    ///
+    /// [`Buffer::zero`]: super::Buffer::zero
+    /// [`Stream::run`]: super::Stream::run
+    pub unsafe fn zero_at<T: Plain>(&self, at: Ptr<T>, len: usize) -> Result<(), Error> {
+        self.driver.zero(at.addr(), bytes::<T>("cuMemsetD8Async", len)?)
+    }
+
+    /// Copies `data` to the GPU at `to`, as [`Buffer::write`] does: after the kernels launched before have run, but
+    /// those of a stream apart.
+    ///
+    /// # Safety
+    ///
+    /// `to` is the address of `data.len()` elements of memory of this GPU, and no work reaches them until the copy is
+    /// done: the driver may still copy from its own memory to the GPU's when the call returns, before the work that a
+    /// stream apart is given.
+    ///
+    /// [`Buffer::write`]: super::Buffer::write
+    pub unsafe fn write_at<T: Plain>(&self, to: Ptr<T>, data: &[T]) -> Result<(), Error> {
+        self.driver.write(to.addr(), data)
+    }
+
+    /// Copies the `out.len()` elements at `from` to `out`, as [`Buffer::read_into`] does: after the kernels launched
+    /// before have run, but those of a stream apart.
+    ///
+    /// # Safety
+    ///
+    /// `from` is the address of `out.len()` elements of memory of this GPU, which no work writes while the copy runs.
+    ///
+    /// [`Buffer::read_into`]: super::Buffer::read_into
+    pub unsafe fn read_at<T: Plain>(&self, from: Ptr<T>, out: &mut [T]) -> Result<(), Error> {
+        self.driver.read_into(from.addr(), out)
     }
 
     /// `Ok` if `memory` is of this GPU: memory of another is not copied here.
